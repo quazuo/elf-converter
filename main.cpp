@@ -28,7 +28,7 @@ public:
         std::set<int> calls = getCallIndexes(x86Code);
 
         size_t currOffset = 0;
-        std::vector<ArmCode> xArchCode{};
+        std::vector<std::vector<std::string>> armCode{};
 
         std::cout << "\n\n\n"; // debug
 
@@ -43,13 +43,13 @@ public:
             }
 
             auto currOp = convertOp(currInstr, i, keystone, jumps);
-            xArchCode.push_back(currOp);
+            armCode.push_back(currOp);
 
-            auto [code, size] = currOp;
-
-            for (auto &str: code)
+            for (auto &str : currOp) {
                 std::cout << currOffset << "\t" << str << "\n";
-            currOffset += size;
+            }
+
+            currOffset += 4 * currOp.size();
         }
 
         // todo -- handle offsets/sizes of instrs

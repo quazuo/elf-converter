@@ -272,6 +272,7 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, KeystoneWrappe
             break;
     }
 
+    // todo - perhaps remove size?
     size_t size = 0;
     std::string mergedCode;
 
