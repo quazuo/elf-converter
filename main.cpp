@@ -3,6 +3,7 @@
 #include <fstream>
 #include <array>
 #include <vector>
+#include <cstring>
 
 #include "struct.h"
 #include "convert.h"
@@ -53,8 +54,11 @@ public:
         }
 
         removeUselessSections();
-        fixSectionNameTable();
-        // todo -- fix shstrtab
+        auto newShstrtab = fixSectionNameTable();
+
+        std::for_each(sectionHeaders.begin(), sectionHeaders.end(), [newShstrtab](Elf64_Shdr &sec) {
+            std::cout << newShstrtab[sec.sh_name] << newShstrtab[sec.sh_name + 1] << "\n";
+        });
     }
 
 private:
@@ -96,7 +100,8 @@ private:
 
     void removeUselessSections() {
         std::erase_if(sectionHeaders, [this](Elf64_Shdr &section) {
-            return isUselessSectionName(getSectionName(section));
+            auto name = getSectionName(section);
+            return isUselessSectionName(name);
         });
 
         // fix links in section headers
@@ -120,11 +125,40 @@ private:
         });
     }
 
-    void fixSectionNameTable() {
+    std::vector<char> fixSectionNameTable() {
+        std::vector<char> res = { '\0' };
 
+        auto shstrtab = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this](Elf64_Shdr &sec) {
+            return getSectionName(sec) == ".shstrtab";
+        });
+
+        auto offset = shstrtab->sh_offset;
+        auto gluedNames = std::string(file.begin() + offset, file.begin() + offset + shstrtab->sh_size);
+
+        for (size_t i = 1; i < shstrtab->sh_size;) {
+            auto currName = std::string(gluedNames.c_str() + i); // trick to split on null characters
+
+            if (!isUselessSectionName(currName)) {
+                res.insert(res.end(), currName.begin(), currName.end());
+                res.push_back('\0');
+            }
+
+            i += currName.length() + 1;
+        }
+
+        std::for_each(sectionHeaders.begin(), sectionHeaders.end(), [res, this](Elf64_Shdr &sec) {
+            if (sec.sh_type == SHT_NULL) {
+                return;
+            }
+
+            auto name = getSectionName(sec);
+            auto it = std::search(res.begin(), res.end(), name.begin(), name.end());
+            sec.sh_name = std::distance(res.begin(), it);
+        });
+
+        return res;
     }
 
-    // prob debug
     std::string getSectionName(Elf64_Shdr &section) {
         auto shstrtabPos = sectionHeaders[elfHeader.e_shstrndx].sh_offset;
         auto nameOffset = section.sh_name;
@@ -136,7 +170,7 @@ private:
         return res;
     }
 
-    static bool isUselessSectionName(std::string &&name) {
+    static bool isUselessSectionName(const std::string &name) {
         return name == ".note.gnu.property" || name.ends_with(".eh_frame");
     };
 
