@@ -53,7 +53,7 @@ public:
         }
 
         removeUselessSections();
-
+        fixSectionNameTable();
         // todo -- fix shstrtab
     }
 
@@ -118,6 +118,10 @@ private:
                 sec.sh_link = strtabIndex;
             }
         });
+    }
+
+    void fixSectionNameTable() {
+
     }
 
     // prob debug
