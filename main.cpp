@@ -45,14 +45,16 @@ public:
             auto currOp = convertOp(currInstr, i, keystone, jumps);
             armCode.push_back(currOp);
 
-            for (auto &str : currOp) {
+            for (auto &str: currOp) {
                 std::cout << currOffset << "\t" << str << "\n";
             }
 
             currOffset += 4 * currOp.size();
         }
 
-        // todo -- handle offsets/sizes of instrs
+        removeUselessSections();
+
+        // todo -- fix shstrtab
     }
 
 private:
@@ -92,10 +94,36 @@ private:
         }
     }
 
+    void removeUselessSections() {
+        std::erase_if(sectionHeaders, [this](Elf64_Shdr &section) {
+            return isUselessSectionName(getSectionName(section));
+        });
+
+        // fix links in section headers
+        size_t symtabIndex = 0;
+        size_t strtabIndex = 0;
+
+        while (sectionHeaders[symtabIndex].sh_type != SHT_SYMTAB) {
+            symtabIndex++;
+        }
+
+        while (sectionHeaders[strtabIndex].sh_type != SHT_STRTAB) {
+            strtabIndex++;
+        }
+
+        std::for_each(sectionHeaders.begin(), sectionHeaders.end(), [symtabIndex, strtabIndex](Elf64_Shdr &sec) {
+            if (sec.sh_type == SHT_RELA) {
+                sec.sh_link = symtabIndex;
+            } else if (sec.sh_type == SHT_SYMTAB) {
+                sec.sh_link = strtabIndex;
+            }
+        });
+    }
+
     // prob debug
-    std::string getSectionName(size_t sectionIndex) {
+    std::string getSectionName(Elf64_Shdr &section) {
         auto shstrtabPos = sectionHeaders[elfHeader.e_shstrndx].sh_offset;
-        auto nameOffset = sectionHeaders[sectionIndex].sh_name;
+        auto nameOffset = section.sh_name;
         std::string res;
 
         for (size_t i = shstrtabPos + nameOffset; file[i] != '\0'; i++)
@@ -103,6 +131,10 @@ private:
 
         return res;
     }
+
+    static bool isUselessSectionName(std::string &&name) {
+        return name == ".note.gnu.property" || name.ends_with(".eh_frame");
+    };
 
     Assembly disassemble(csh &handle, size_t offset, size_t size) {
         cs_insn *insn;
