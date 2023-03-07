@@ -4,6 +4,7 @@
 #include <array>
 #include <vector>
 #include <cstring>
+#include <iomanip>
 
 #include "struct.h"
 #include "convert.h"
@@ -11,7 +12,7 @@
 class ElfConverter {
 
 public:
-    explicit ElfConverter(std::vector<char> &file) : file(file) {
+    explicit ElfConverter(std::vector<uint8_t> &file) : file(file) {
         parseElfHeader();
         parseSectionHeaders();
         parseSymbols();
@@ -21,54 +22,92 @@ public:
         CapstoneWrapper capstone;
         KeystoneWrapper keystone;
 
-        auto textSectionOffset = sectionHeaders[1].sh_offset;
-        auto textSectionSize = sectionHeaders[1].sh_size;
-        Assembly x86Code = disassemble(capstone.handle, textSectionOffset, textSectionSize);
+        // .text ass
+        {
+            auto textSectionOffset = sectionHeaders[1].sh_offset;
+            auto textSectionSize = sectionHeaders[1].sh_size;
+            Assembly x86Code = disassemble(capstone.handle, textSectionOffset, textSectionSize);
 
-        std::map<int, int> jumps = getArmJumps(x86Code);
-        std::set<int> calls = getCallIndexes(x86Code);
+            std::map<int, int> jumps = getArmJumps(x86Code);
+            std::set<int> calls = getCallIndexes(x86Code);
 
-        size_t currOffset = 0;
-        std::vector<std::vector<std::string>> armCode{};
+            size_t currOffset = 0;
+            std::vector<std::vector<std::string>> armCode{};
 
-        std::cout << "\n\n\n"; // debug
+            std::cout << "\n\n\n"; // debug
 
-        for (int i = 0; i < x86Code.count; i++) {
-            cs_insn currInstr = x86Code.insn[i];
-            InstrType type = getInstrType(currInstr);
+            for (int i = 0; i < x86Code.count; i++) {
+                cs_insn currInstr = x86Code.insn[i];
+                InstrType type = getInstrType(currInstr);
 
-            if (type == PROLOGUE) {
-                i += x86Prologue.size() - 1;
-            } else if (type == EPILOGUE) {
-                i += x86Epilogue.size() - 1;
+                if (type == PROLOGUE) {
+                    i += x86Prologue.size() - 1;
+                } else if (type == EPILOGUE) {
+                    i += x86Epilogue.size() - 1;
+                }
+
+                auto currOp = convertOp(currInstr, i, keystone, jumps);
+                armCode.push_back(currOp);
+
+                for (auto &str: currOp) {
+                    std::cout << currOffset << "\t" << str << "\n";
+                }
+
+                currOffset += 4 * currOp.size();
             }
-
-            auto currOp = convertOp(currInstr, i, keystone, jumps);
-            armCode.push_back(currOp);
-
-            for (auto &str: currOp) {
-                std::cout << currOffset << "\t" << str << "\n";
-            }
-
-            currOffset += 4 * currOp.size();
         }
 
         removeUselessSections();
         auto newShstrtab = fixSectionNameTable();
+        fixElfHeader();
 
-        std::for_each(sectionHeaders.begin(), sectionHeaders.end(), [newShstrtab](Elf64_Shdr &sec) {
-            std::cout << newShstrtab[sec.sh_name] << newShstrtab[sec.sh_name + 1] << "\n";
-        });
+        std::vector<uint8_t> newFile;
+        newFile.insert(newFile.begin(), (uint8_t *)&elfHeader, (uint8_t *)&elfHeader + elfHeader.e_ehsize);
+
+        size_t sectionsOffset = elfHeader.e_ehsize + sectionHeaders.size() * elfHeader.e_shentsize;
+
+        // generate stub section headers that we will fill in later // todo -- fill it with headers
+        newFile.resize(sectionsOffset);
+
+        for (auto &sec : sectionHeaders) {
+
+
+
+
+        }
     }
 
 private:
-    std::vector<char> file;
+    std::vector<uint8_t> file;
     Elf64_Ehdr elfHeader{};
     std::vector<Elf64_Shdr> sectionHeaders;
     std::vector<Elf64_Sym> symbols;
 
     void parseElfHeader() {
-        std::copy_n(file.begin(), sizeof elfHeader, (char *) &elfHeader);
+        std::copy_n(file.begin(), sizeof elfHeader, (uint8_t *) &elfHeader);
+    }
+
+    void fixElfHeader() {
+        elfHeader.e_machine = EM_AARCH64;
+        elfHeader.e_shoff = elfHeader.e_ehsize;
+
+        auto shstrtabIter = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this](Elf64_Shdr &sec) {
+            return getSectionName(sec) == ".shstrtab";
+        });
+
+        elfHeader.e_shstrndx = std::distance(sectionHeaders.begin(), shstrtabIter);
+
+        // debug
+        for (int i = 0; i < elfHeader.e_ehsize / 16; i++) {
+            for (int j = 0; j < 16; j += 2)
+                std::cout
+                    << std::setfill('0') << std::setw(2) << std::hex
+                    << (int)*((uint8_t *)&elfHeader + 16 * i + j + 1)
+                    << std::setfill('0') << std::setw(2) << std::hex
+                    << (int)*((uint8_t *)&elfHeader + 16 * i + j)
+                    << " ";
+            std::cout << "\n";
+        }
     }
 
     void parseSectionHeaders() {
@@ -85,8 +124,8 @@ private:
     void parseSymbols() {
         auto symbolSectionHeader = std::find_if(sectionHeaders.begin(), sectionHeaders.end(),
                                                 [](Elf64_Shdr &hdr) { return hdr.sh_type == SHT_SYMTAB; });
-        size_t base = symbolSectionHeader->sh_offset;
-        size_t offset = 0;
+        auto base = symbolSectionHeader->sh_offset;
+        auto offset = 0;
 
         while (offset < symbolSectionHeader->sh_size) {
             Elf64_Sym symbol;
@@ -99,10 +138,11 @@ private:
     }
 
     void removeUselessSections() {
-        std::erase_if(sectionHeaders, [this](Elf64_Shdr &section) {
-            auto name = getSectionName(section);
-            return isUselessSectionName(name);
+        auto erasedCount = std::erase_if(sectionHeaders, [this](Elf64_Shdr &section) {
+            return isUselessSectionName(getSectionName(section));
         });
+
+        elfHeader.e_shnum -= erasedCount;
 
         // fix links in section headers
         size_t symtabIndex = 0;
@@ -126,7 +166,7 @@ private:
     }
 
     std::vector<char> fixSectionNameTable() {
-        std::vector<char> res = { '\0' };
+        std::vector<char> res = {'\0'};
 
         auto shstrtab = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this](Elf64_Shdr &sec) {
             return getSectionName(sec) == ".shstrtab";
@@ -177,7 +217,7 @@ private:
     Assembly disassemble(csh &handle, size_t offset, size_t size) {
         cs_insn *insn;
 
-        size_t count = cs_disasm(handle, reinterpret_cast<const uint8_t *>(&file[offset]), size, 0, 0, &insn);
+        size_t count = cs_disasm(handle, &file[offset], size, 0, 0, &insn);
 
         if (count <= 0) {
             cs_close(&handle);
@@ -211,8 +251,8 @@ int main(int argc, char *argv[]) {
     }
 
     std::basic_ifstream<char> fileHandle = readFile(argv[1]);
-    auto file = std::vector<char>(std::istreambuf_iterator<char>(fileHandle),
-                                  std::istreambuf_iterator<char>());
+    auto file = std::vector<uint8_t>(std::istreambuf_iterator<char>(fileHandle),
+                                     std::istreambuf_iterator<char>());
     fileHandle.close();
 
     ElfConverter converter(file);
