@@ -4,6 +4,7 @@
 #include <set>
 #include <vector>
 #include <elf.h>
+#include <functional>
 
 #include "const.h"
 #include "struct.h"
@@ -118,80 +119,89 @@ static std::vector<std::string> convertSubOp(cs_insn instr) {
     return {convertArithmeticOp(instr, SUB)};
 }
 
-static std::vector<std::string> generateMemAccess(std::string &arg, const std::string &dest) {
+static CodeWithReloc generateMemAccess(std::string &arg, const std::string &dest) {
     auto [base, sign, offset] = splitMemAccess(arg);
 
     if (base == "rip") {
         std::string instr1 = "ldr " + convertReg(base) + ", #0";
-        return {instr1};
+        return {{instr1}, R_AARCH64_LD_PREL_LO19};
 
         // todo - reloc
 
     } else {
         std::string instr1 = "mov " + tmp1_64 + ", " + (sign == '-' ? "-" : "") + offset;
         std::string instr2 = "ldr " + convertReg(dest) + ", [" + convertReg(base) + ", " + tmp1_64 + "]";
-        return {instr1, instr2};
+        return {{instr1, instr2}, R_AARCH64_NONE};
     }
 }
 
-static std::vector<std::string> convertCmpOp(cs_insn instr) {
+static CodeWithReloc convertCmpOp(cs_insn instr) {
     auto [arg1, arg2] = splitArgs(instr);
 
     if (arg1.find('[') != std::string::npos) { // cmp mem, reg/imm
-        auto code = generateMemAccess(arg1, tmp1_64);
+        auto [code, reloc] = generateMemAccess(arg1, tmp1_64);
 
         std::string newArg1 = getAppropriateTemp1Reg(arg2);
         std::string newArg2 = isReg(arg2) ? convertReg(arg2) : arg2;
 
         code.emplace_back("cmp " + newArg1 + ", " + newArg2);
-        return code;
+        return {code, reloc};
     }
 
     if (arg2.find('[') != std::string::npos) { // cmp reg, mem
-        auto code = generateMemAccess(arg2, tmp1_64);
+        auto [code, reloc] = generateMemAccess(arg2, tmp1_64);
 
         std::string newArg1 = convertReg(arg1);
         std::string newArg2 = getAppropriateTemp1Reg(arg1);
 
         code.emplace_back("cmp " + newArg1 + ", " + newArg2);
-        return code;
+        return {code, reloc};
     }
 
     // cmp reg, reg/imm
     std::string newArg1 = convertReg(arg1);
     std::string newArg2 = isReg(arg2) ? convertReg(arg2) : arg2;
-    return {"cmp " + newArg1 + ", " + newArg2};
+    return {
+        {"cmp " + newArg1 + ", " + newArg2},
+        R_AARCH64_NONE
+    };
 }
 
-static std::vector<std::string> convertCallOp(cs_insn instr) {
-    // todo - reloc
-    return {"bl #0", "mov x9, x0"};
+static CodeWithReloc convertCallOp(cs_insn instr) {
+    return {
+        {"bl #0", "mov x9, x0"},
+        R_AARCH64_CALL26
+    };
 }
 
-static std::vector<std::string> convertMovOp(cs_insn instr) {
+static CodeWithReloc convertMovOp(cs_insn instr) {
     auto [arg1, arg2] = splitArgs(instr);
 
     if (arg1.find('[') != std::string::npos) { // mov mem, reg/imm
         auto [base, sign, offset] = splitMemAccess(arg1);
 
         if (base == "rip") {
-            // todo - reloc
-
             auto tmp2 = getAppropriateTemp2Reg(arg2);
 
             return {
-                "adr " + tmp1_64 + ", #0",
-                "mov " + tmp2 + ", " + arg2,
-                "str " + tmp2 + ", [" + tmp1_64 + "]"
+                {
+                    "adr " + tmp1_64 + ", #0",
+                    "mov " + tmp2 + ", " + arg2,
+                    "str " + tmp2 + ", [" + tmp1_64 + "]"
+                },
+                R_AARCH64_ADR_PREL_LO21
             };
 
         } else {
             if (!isReg(arg2) /* && ma relokację */) {
                 return {
-                    "adr " + tmp1_64 + ", #0",
-                    "mov " + tmp2_64 + ", " + offset,
-                    "str " + tmp1_64 + ", [" + convertReg(base) + ", " + tmp2_64 + "]"
-                    // todo - tmp1_64 w trzeciej linijce powinno byc pewnie jakims tam tmp1 (?)
+                    {
+                        "adr " + tmp1_64 + ", #0",
+                        "mov " + tmp2_64 + ", " + offset,
+                        "str " + tmp1_64 + ", [" + convertReg(base) + ", " + tmp2_64 + "]"
+                        // todo - tmp1_64 w trzeciej linijce powinno byc pewnie jakims tam tmp1 (?)
+                    },
+                    R_AARCH64_ADR_PREL_LO21
                 };
             }
 
@@ -199,9 +209,12 @@ static std::vector<std::string> convertMovOp(cs_insn instr) {
             auto newArg2 = isReg(arg2) ? convertReg(arg2) : arg2;
 
             return {
-                "mov " + tmp1 + ", " + newArg2,
-                "mov " + tmp2_64 + ", " + (sign == '-' ? "-" : "") + offset,
-                "str " + tmp1 + ", [" + convertReg(base) + ", " + tmp2_64 + "]"
+                {
+                    "mov " + tmp1 + ", " + newArg2,
+                    "mov " + tmp2_64 + ", " + (sign == '-' ? "-" : "") + offset,
+                    "str " + tmp1 + ", [" + convertReg(base) + ", " + tmp2_64 + "]"
+                },
+                R_AARCH64_NONE
             };
         }
 
@@ -213,13 +226,19 @@ static std::vector<std::string> convertMovOp(cs_insn instr) {
 
     // mov reg, reg/imm
 
-    if (!isReg(arg2) /* && ma relokację */) { // todo - reloc
+    if (!isReg(arg2) /* && ma relokację */) {
         arg1[0] = 'r';
-        return {"adr " + convertReg(arg1) + ", #0"};
+        return {
+            {"adr " + convertReg(arg1) + ", #0"},
+            R_AARCH64_ADR_PREL_LO21
+        };
     }
 
     auto newArg2 = isReg(arg2) ? convertReg(arg2) : arg2;
-    return {"mov " + convertReg(arg1) + ", " + newArg2};
+    return {
+        {"mov " + convertReg(arg1) + ", " + newArg2},
+        R_AARCH64_NONE
+    };
 }
 
 static std::vector<std::string> convertJmpOp(cs_insn instr, int offset) {
@@ -239,9 +258,10 @@ static std::vector<std::string> convertCondJmpOp(cs_insn instr, int offset) {
     return {"b." + cond + " " + std::to_string(offset)};
 }
 
-std::vector<std::string> convertOp(cs_insn instr, int instrIndex, KeystoneWrapper &ks, std::map<int, int> &jumps) {
+std::vector<std::string> convertOp(cs_insn instr, int instrIndex, std::map<int, int> &jumps) {
     InstrType type = getInstrType(instr);
     std::vector<std::string> code;
+    CodeWithReloc codeWithReloc;
 
     switch (type) {
         case PROLOGUE:
@@ -257,13 +277,16 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, KeystoneWrappe
             code = convertSubOp(instr);
             break;
         case CMP:
-            code = convertCmpOp(instr);
+            codeWithReloc = convertCmpOp(instr);
+            code = codeWithReloc.first;
             break;
         case CALL:
-            code = convertCallOp(instr);
+            codeWithReloc = convertCallOp(instr);
+            code = codeWithReloc.first;
             break;
         case MOV:
-            code = convertMovOp(instr);
+            codeWithReloc = convertMovOp(instr);
+            code = codeWithReloc.first;
             break;
         case JMP:
             code = convertJmpOp(instr, jumps[instrIndex]);
@@ -273,26 +296,28 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, KeystoneWrappe
             break;
     }
 
-    // todo - perhaps remove size?
-    size_t size = 0;
-    std::string mergedCode;
-
-    for (auto &line: code) {
-        mergedCode.append(line).append("; ");
-    }
-
-    unsigned char *encode;
-    size_t curr_size = 0, count;
-
-    // todo - address (currently 0)
-    if (ks_asm(ks.handle, mergedCode.c_str(), 0, &encode, &size, &count)) {
-        throw std::runtime_error("ks_asm failed on instruction " + mergedCode);
-    }
-
-    size += curr_size;
-    ks_free(encode);
-
     return code;
+}
+
+CodeWithReloc convertOpWithReloc(cs_insn instr) {
+    InstrType type = getInstrType(instr);
+    CodeWithReloc codeWithReloc;
+
+    switch (type) {
+        case CMP:
+            codeWithReloc = convertCmpOp(instr);
+            break;
+        case CALL:
+            codeWithReloc = convertCallOp(instr);
+            break;
+        case MOV:
+            codeWithReloc = convertMovOp(instr);
+            break;
+        default:
+            throw std::runtime_error("unexpected operation in " + std::string(__FUNCTION__));
+    }
+
+    return codeWithReloc;
 }
 
 std::map<int, int> getArmJumps(Assembly &code) {
@@ -339,8 +364,8 @@ std::set<int> getCallIndexes(Assembly &code) {
     return res;
 }
 
-std::map<int, Elf64_Rela> getRelocIndexes(Assembly &code, std::vector<Elf64_Rela> &relocs) {
-    std::map<int, Elf64_Rela> res;
+std::map<int, size_t> getRelocIndexes(Assembly &code, std::vector<Elf64_Rela> &relocs) {
+    std::map<int, size_t> res;
 
     for (int i = 0; i < code.count; i++) {
         cs_insn currInstr = code.insn[i];
@@ -349,11 +374,11 @@ std::map<int, Elf64_Rela> getRelocIndexes(Assembly &code, std::vector<Elf64_Rela
             cs_insn nextInstr = code.insn[i + 1];
 
             auto reloc = std::find_if(relocs.begin(), relocs.end(), [currInstr, nextInstr](Elf64_Rela &reloc) {
-               return reloc.r_offset >= currInstr.address && reloc.r_offset < nextInstr.address;
+                return reloc.r_offset >= currInstr.address && reloc.r_offset < nextInstr.address;
             });
 
             if (reloc != relocs.end()) {
-                res[i] = *reloc;
+                res[i] = std::distance(relocs.begin(), reloc);
             }
 
         } else {
@@ -362,7 +387,7 @@ std::map<int, Elf64_Rela> getRelocIndexes(Assembly &code, std::vector<Elf64_Rela
             });
 
             if (reloc != relocs.end()) {
-                res[i] = *reloc;
+                res[i] = std::distance(relocs.begin(), reloc);
             }
         }
     }

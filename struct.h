@@ -5,10 +5,7 @@
 #include <capstone/capstone.h>
 #include <stdexcept>
 
-struct Jump {
-    int from;
-    int offset;
-};
+using CodeWithReloc = std::pair<std::vector<std::string>, Elf64_Xword>;
 
 struct Assembly {
     cs_insn *insn;

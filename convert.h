@@ -24,12 +24,14 @@ enum InstrType {
 
 InstrType getInstrType(cs_insn instr);
 
-std::vector<std::string> convertOp(cs_insn instr, int instrIndex, KeystoneWrapper &ks, std::map<int, int> &jumps);
+std::vector<std::string> convertOp(cs_insn instr, int instrIndex, std::map<int, int> &jumps);
+
+CodeWithReloc convertOpWithReloc(cs_insn instr);
 
 std::map<int, int> getArmJumps(Assembly &code);
 
 std::set<int> getCallIndexes(Assembly &code);
 
-std::map<int, Elf64_Rela> getRelocIndexes(Assembly &code, std::vector<Elf64_Rela> &relocs);
+std::map<int, size_t> getRelocIndexes(Assembly &code, std::vector<Elf64_Rela> &relocs);
 
 #endif //CONVERTER_CONVERT_H

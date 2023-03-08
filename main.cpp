@@ -32,6 +32,9 @@ public:
         size_t sectionsOffset = elfHeader.e_ehsize + sectionHeaders.size() * elfHeader.e_shentsize;
         size_t symtabOffset;
 
+        // save these instead of saving them
+        std::map<size_t, std::vector<Elf64_Rela>> newRelocTables;
+
         // generate stub section headers that will be filled in later // todo -- fill it with headers
         newFile.resize(sectionsOffset);
 
@@ -46,14 +49,14 @@ public:
             } else if (sec.sh_type == SHT_SYMTAB) {
                 symtabOffset = currOffset;
                 currSize = symbols.size() * sizeof(Elf64_Sym); // ??? todo make sure this sizeof works
+                newFile.resize(newFile.size() + currSize);
 
             } else if (sec.sh_flags & SHF_EXECINSTR) {
                 Assembly x86Code = disassemble(capstone.handle, sec.sh_offset, sec.sh_size);
 
                 // get relocations data
                 std::vector<Elf64_Rela> relocs = getRelocs(sec);
-                std::map<int, Elf64_Rela> relocIndexes = getRelocIndexes(x86Code, relocs);
-                std::vector<Elf64_Rela> newRelocs;
+                std::map<int, size_t> relocIndexes = getRelocIndexes(x86Code, relocs); // (indexOfInstr, indexOfReloc)
 
                 // helper data
                 std::map<int, int> jumps = getArmJumps(x86Code);
@@ -68,25 +71,71 @@ public:
 
                     if (type == PROLOGUE) {
                         i += x86Prologue.size() - 1;
+
+                        // todo - fiddle with symbols a bit (goofy ahh shits goin on here)
+
                     } else if (type == EPILOGUE) {
                         i += x86Epilogue.size() - 1;
                     }
 
-                    auto currOp = convertOp(currInstr, i, keystone, jumps);
-                    armCode.push_back(currOp);
+                    std::vector<std::string> currCode;
 
-                    for (auto &str: currOp) {
+                    if (relocIndexes.contains(i)) {
+                        auto codeWithReloc = convertOpWithReloc(currInstr);
+                        currCode = codeWithReloc.first;
+                        auto currRelocType = codeWithReloc.second;
+                        Elf64_Rela *currReloc = &relocs[relocIndexes.at(i)];
+
+                        currReloc->r_info = ELF64_R_INFO(ELF64_R_SYM(currReloc->r_info), currRelocType);
+                        currReloc->r_offset = currInstrOffset;
+
+                        if (currRelocType == R_AARCH64_CALL26) {
+                            currReloc->r_addend = 0;
+                        }
+
+                        if (currRelocType == R_AARCH64_NONE)
+                            throw std::runtime_error("XD");
+
+//                        std::cout << "\t\t\t\t!RELOC! "
+//                                  << relocs[relocIndexes.at(i)].r_offset
+//                                  << " "
+//                                  << currInstrOffset
+//                                  << "\n";
+
+                    } else {
+                        currCode = convertOp(currInstr, i, jumps);
+                    }
+
+                    armCode.push_back(currCode);
+
+                    for (auto &str: currCode) {
                         std::cout << currInstrOffset << "\t" << str << "\n";
                     }
 
-                    if (relocIndexes.contains(i)) {
-                        std::cout << "\t\t\t\t!RELOC! " << relocIndexes.at(i).r_offset << " " << currInstrOffset << "\n";
-                    }
-
-                    currInstrOffset += 4 * currOp.size();
+                    currInstrOffset += 4 * currCode.size();
                 }
 
-                // todo - dokonczyc
+                std::string mergedCode;
+
+                for (auto &codeGroup: armCode) {
+                    for (auto &line: codeGroup) {
+                        mergedCode.append(line).append("\n");
+                    }
+                }
+
+                unsigned char *encode;
+                size_t count;
+
+                if (ks_asm(keystone.handle, mergedCode.c_str(), currOffset, &encode, &currSize, &count)) {
+                    throw std::runtime_error("ks_asm failed on instruction " + mergedCode);
+                }
+
+                std::cout << mergedCode;
+
+                newFile.insert(newFile.end(), encode, encode + currSize);
+                ks_free(encode);
+
+                newRelocTables.emplace(currOffset + currSize, relocs);
 
             } else {
                 newFile.insert(newFile.end(), file.begin() + sec.sh_offset,
@@ -94,13 +143,63 @@ public:
                 currSize = sec.sh_size;
             }
 
-            //...
+            // align
+            if (sec.sh_addralign) {
+                auto rem = currOffset % sec.sh_addralign;
 
-            sec.sh_offset = currOffset;
+                if (rem != 0) {
+                    newFile.resize(newFile.size() + sec.sh_addralign - rem);
+                    currOffset += sec.sh_addralign - rem;
+                }
+            }
+
+            sec.sh_offset = sectionsOffset + currOffset;
+            sec.sh_size = currSize;
             currOffset += currSize;
         }
 
-        // todo - fill in symtab and section headers
+        // reloc sections!
+        for (auto &[pos, relocTable] : newRelocTables) {
+            size_t offset = 0;
+
+            for (auto &reloc : relocTable) {
+                std::copy_n((uint8_t *)&reloc, sizeof reloc, newFile.begin() + pos + offset);
+                offset += sizeof reloc;
+            }
+        }
+
+        // symtab section!
+        size_t offset = 0;
+
+        for (auto &sym : symbols) {
+            std::copy_n((uint8_t *)&sym, sizeof sym, newFile.begin() + symtabOffset + offset);
+            offset += sizeof sym;
+        }
+
+        // section headers!
+        offset = 0;
+
+        for (auto &header : sectionHeaders) {
+            std::copy_n((uint8_t *)&header, sizeof header, newFile.begin() + elfHeader.e_ehsize + offset);
+            offset += sizeof header;
+        }
+
+        // It is finished.
+
+
+
+        // debug
+        for (int i = 0; i < 100; i++) {
+            std::cout << std::setfill('0') << std::setw(6) << std::hex << i * 16 << "\t";
+            for (int j = 0; j < 16; j += 2)
+                std::cout
+                    << std::setfill('0') << std::setw(2) << std::hex
+                    << (int) *((uint8_t *) &newFile[16 * i + j + 1])
+                    << std::setfill('0') << std::setw(2) << std::hex
+                    << (int) *((uint8_t *) &newFile[16 * i + j])
+                    << " ";
+            std::cout << "\n";
+        }
     }
 
 private:
@@ -144,18 +243,6 @@ private:
         });
 
         elfHeader.e_shstrndx = std::distance(sectionHeaders.begin(), shstrtabIter);
-
-        // debug
-        for (int i = 0; i < elfHeader.e_ehsize / 16; i++) {
-            for (int j = 0; j < 16; j += 2)
-                std::cout
-                    << std::setfill('0') << std::setw(2) << std::hex
-                    << (int) *((uint8_t *) &elfHeader + 16 * i + j + 1)
-                    << std::setfill('0') << std::setw(2) << std::hex
-                    << (int) *((uint8_t *) &elfHeader + 16 * i + j)
-                    << " ";
-            std::cout << "\n";
-        }
     }
 
     void parseSectionHeaders() {
