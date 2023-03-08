@@ -30,4 +30,6 @@ std::map<int, int> getArmJumps(Assembly &code);
 
 std::set<int> getCallIndexes(Assembly &code);
 
+std::map<int, Elf64_Rela> getRelocIndexes(Assembly &code, std::vector<Elf64_Rela> &relocs);
+
 #endif //CONVERTER_CONVERT_H

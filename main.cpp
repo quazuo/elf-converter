@@ -22,59 +22,85 @@ public:
         CapstoneWrapper capstone;
         KeystoneWrapper keystone;
 
-        // .text ass
-        {
-            auto textSectionOffset = sectionHeaders[1].sh_offset;
-            auto textSectionSize = sectionHeaders[1].sh_size;
-            Assembly x86Code = disassemble(capstone.handle, textSectionOffset, textSectionSize);
-
-            std::map<int, int> jumps = getArmJumps(x86Code);
-            std::set<int> calls = getCallIndexes(x86Code);
-
-            size_t currOffset = 0;
-            std::vector<std::vector<std::string>> armCode{};
-
-            std::cout << "\n\n\n"; // debug
-
-            for (int i = 0; i < x86Code.count; i++) {
-                cs_insn currInstr = x86Code.insn[i];
-                InstrType type = getInstrType(currInstr);
-
-                if (type == PROLOGUE) {
-                    i += x86Prologue.size() - 1;
-                } else if (type == EPILOGUE) {
-                    i += x86Epilogue.size() - 1;
-                }
-
-                auto currOp = convertOp(currInstr, i, keystone, jumps);
-                armCode.push_back(currOp);
-
-                for (auto &str: currOp) {
-                    std::cout << currOffset << "\t" << str << "\n";
-                }
-
-                currOffset += 4 * currOp.size();
-            }
-        }
-
         removeUselessSections();
-        auto newShstrtab = fixSectionNameTable();
+        std::vector<uint8_t> newShstrtab = fixSectionNameTable();
         fixElfHeader();
 
         std::vector<uint8_t> newFile;
-        newFile.insert(newFile.begin(), (uint8_t *)&elfHeader, (uint8_t *)&elfHeader + elfHeader.e_ehsize);
+        newFile.insert(newFile.begin(), (uint8_t *) &elfHeader, (uint8_t *) &elfHeader + elfHeader.e_ehsize);
 
         size_t sectionsOffset = elfHeader.e_ehsize + sectionHeaders.size() * elfHeader.e_shentsize;
+        size_t symtabOffset;
 
-        // generate stub section headers that we will fill in later // todo -- fill it with headers
+        // generate stub section headers that will be filled in later // todo -- fill it with headers
         newFile.resize(sectionsOffset);
 
-        for (auto &sec : sectionHeaders) {
+        size_t currOffset = 0;
+        for (auto &sec: sectionHeaders) {
+            size_t currSize = 0;
 
+            if (getSectionName(sec) == ".shstrtab") {
+                newFile.insert(newFile.end(), newShstrtab.begin(), newShstrtab.end());
+                currSize = newShstrtab.size();
 
+            } else if (sec.sh_type == SHT_SYMTAB) {
+                symtabOffset = currOffset;
+                currSize = symbols.size() * sizeof(Elf64_Sym); // ??? todo make sure this sizeof works
 
+            } else if (sec.sh_flags & SHF_EXECINSTR) {
+                Assembly x86Code = disassemble(capstone.handle, sec.sh_offset, sec.sh_size);
 
+                // get relocations data
+                std::vector<Elf64_Rela> relocs = getRelocs(sec);
+                std::map<int, Elf64_Rela> relocIndexes = getRelocIndexes(x86Code, relocs);
+                std::vector<Elf64_Rela> newRelocs;
+
+                // helper data
+                std::map<int, int> jumps = getArmJumps(x86Code);
+                std::set<int> calls = getCallIndexes(x86Code);
+
+                size_t currInstrOffset = 0;
+                std::vector<std::vector<std::string>> armCode{};
+
+                for (int i = 0; i < x86Code.count; i++) {
+                    cs_insn currInstr = x86Code.insn[i];
+                    InstrType type = getInstrType(currInstr);
+
+                    if (type == PROLOGUE) {
+                        i += x86Prologue.size() - 1;
+                    } else if (type == EPILOGUE) {
+                        i += x86Epilogue.size() - 1;
+                    }
+
+                    auto currOp = convertOp(currInstr, i, keystone, jumps);
+                    armCode.push_back(currOp);
+
+                    for (auto &str: currOp) {
+                        std::cout << currInstrOffset << "\t" << str << "\n";
+                    }
+
+                    if (relocIndexes.contains(i)) {
+                        std::cout << "\t\t\t\t!RELOC! " << relocIndexes.at(i).r_offset << " " << currInstrOffset << "\n";
+                    }
+
+                    currInstrOffset += 4 * currOp.size();
+                }
+
+                // todo - dokonczyc
+
+            } else {
+                newFile.insert(newFile.end(), file.begin() + sec.sh_offset,
+                               file.begin() + sec.sh_offset + sec.sh_size);
+                currSize = sec.sh_size;
+            }
+
+            //...
+
+            sec.sh_offset = currOffset;
+            currOffset += currSize;
         }
+
+        // todo - fill in symtab and section headers
     }
 
 private:
@@ -82,6 +108,28 @@ private:
     Elf64_Ehdr elfHeader{};
     std::vector<Elf64_Shdr> sectionHeaders;
     std::vector<Elf64_Sym> symbols;
+
+    std::vector<Elf64_Rela> getRelocs(Elf64_Shdr &section) {
+        std::vector<Elf64_Rela> relocs;
+
+        auto relocSectionName = ".rela" + getSectionName(section);
+        auto relocSecHdr = std::find_if(sectionHeaders.begin(), sectionHeaders.end(),
+                                        [relocSectionName, this](Elf64_Shdr &s) {
+                                            return getSectionName(s) == relocSectionName;
+                                        });
+
+        auto base = relocSecHdr->sh_offset;
+        auto offset = 0;
+
+        while (offset < relocSecHdr->sh_size) {
+            Elf64_Rela reloc;
+            std::copy_n(file.begin() + base + offset, sizeof(Elf64_Rela), (uint8_t *) &reloc);
+            relocs.push_back(reloc);
+            offset += sizeof(Elf64_Rela);
+        }
+
+        return relocs;
+    }
 
     void parseElfHeader() {
         std::copy_n(file.begin(), sizeof elfHeader, (uint8_t *) &elfHeader);
@@ -102,9 +150,9 @@ private:
             for (int j = 0; j < 16; j += 2)
                 std::cout
                     << std::setfill('0') << std::setw(2) << std::hex
-                    << (int)*((uint8_t *)&elfHeader + 16 * i + j + 1)
+                    << (int) *((uint8_t *) &elfHeader + 16 * i + j + 1)
                     << std::setfill('0') << std::setw(2) << std::hex
-                    << (int)*((uint8_t *)&elfHeader + 16 * i + j)
+                    << (int) *((uint8_t *) &elfHeader + 16 * i + j)
                     << " ";
             std::cout << "\n";
         }
@@ -165,8 +213,8 @@ private:
         });
     }
 
-    std::vector<char> fixSectionNameTable() {
-        std::vector<char> res = {'\0'};
+    std::vector<uint8_t> fixSectionNameTable() {
+        std::vector<uint8_t> res = {'\0'};
 
         auto shstrtab = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this](Elf64_Shdr &sec) {
             return getSectionName(sec) == ".shstrtab";

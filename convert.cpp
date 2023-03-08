@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <set>
 #include <vector>
+#include <elf.h>
 
 #include "const.h"
 #include "struct.h"
@@ -42,7 +43,7 @@ static std::pair<std::string, std::string> splitArgs(cs_insn instr) {
     std::string delim = ", ";
     auto arg1 = args.substr(0, args.find(delim));
     auto arg2 = args.substr(args.find(delim) + delim.length());
-    return { arg1, arg2 };
+    return {arg1, arg2};
 }
 
 static std::tuple<std::string, char, std::string> splitMemAccess(std::string &mem) {
@@ -52,7 +53,7 @@ static std::tuple<std::string, char, std::string> splitMemAccess(std::string &me
     auto offset = mem.substr(mem.find(delim) + delim.length());
     offset.pop_back();
 
-    return {base, delim[1], offset };
+    return {base, delim[1], offset};
 }
 
 enum InstrType {
@@ -110,11 +111,11 @@ static std::string convertArithmeticOp(cs_insn instr, InstrType type) {
 }
 
 static std::vector<std::string> convertAddOp(cs_insn instr) {
-    return { convertArithmeticOp(instr, ADD) };
+    return {convertArithmeticOp(instr, ADD)};
 }
 
 static std::vector<std::string> convertSubOp(cs_insn instr) {
-    return { convertArithmeticOp(instr, SUB) };
+    return {convertArithmeticOp(instr, SUB)};
 }
 
 static std::vector<std::string> generateMemAccess(std::string &arg, const std::string &dest) {
@@ -129,7 +130,7 @@ static std::vector<std::string> generateMemAccess(std::string &arg, const std::s
     } else {
         std::string instr1 = "mov " + tmp1_64 + ", " + (sign == '-' ? "-" : "") + offset;
         std::string instr2 = "ldr " + convertReg(dest) + ", [" + convertReg(base) + ", " + tmp1_64 + "]";
-        return { instr1, instr2 };
+        return {instr1, instr2};
     }
 }
 
@@ -159,12 +160,12 @@ static std::vector<std::string> convertCmpOp(cs_insn instr) {
     // cmp reg, reg/imm
     std::string newArg1 = convertReg(arg1);
     std::string newArg2 = isReg(arg2) ? convertReg(arg2) : arg2;
-    return { "cmp " + newArg1 + ", " + newArg2 };
+    return {"cmp " + newArg1 + ", " + newArg2};
 }
 
 static std::vector<std::string> convertCallOp(cs_insn instr) {
     // todo - reloc
-    return { "bl #0", "mov x9, x0" };
+    return {"bl #0", "mov x9, x0"};
 }
 
 static std::vector<std::string> convertMovOp(cs_insn instr) {
@@ -214,15 +215,15 @@ static std::vector<std::string> convertMovOp(cs_insn instr) {
 
     if (!isReg(arg2) /* && ma relokację */) { // todo - reloc
         arg1[0] = 'r';
-        return { "adr " + convertReg(arg1) + ", #0" };
+        return {"adr " + convertReg(arg1) + ", #0"};
     }
 
     auto newArg2 = isReg(arg2) ? convertReg(arg2) : arg2;
-    return { "mov " + convertReg(arg1) + ", " + newArg2 };
+    return {"mov " + convertReg(arg1) + ", " + newArg2};
 }
 
 static std::vector<std::string> convertJmpOp(cs_insn instr, int offset) {
-    return { "b " + std::to_string(offset) };
+    return {"b " + std::to_string(offset)};
 }
 
 static std::vector<std::string> convertCondJmpOp(cs_insn instr, int offset) {
@@ -235,7 +236,7 @@ static std::vector<std::string> convertCondJmpOp(cs_insn instr, int offset) {
         throw std::runtime_error("conditional jump j" + mnemo + " not supported");
     }
 
-    return { "b." + cond + " " + std::to_string(offset) };
+    return {"b." + cond + " " + std::to_string(offset)};
 }
 
 std::vector<std::string> convertOp(cs_insn instr, int instrIndex, KeystoneWrapper &ks, std::map<int, int> &jumps) {
@@ -276,7 +277,7 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, KeystoneWrappe
     size_t size = 0;
     std::string mergedCode;
 
-    for (auto &line : code) {
+    for (auto &line: code) {
         mergedCode.append(line).append("; ");
     }
 
@@ -325,13 +326,44 @@ std::map<int, int> getArmJumps(Assembly &code) {
 }
 
 std::set<int> getCallIndexes(Assembly &code) {
-    std::set<int> res{};
+    std::set<int> res;
 
     for (int i = 0; i < code.count; i++) {
         auto currInstr = code.insn[i];
 
         if (std::string(currInstr.mnemonic) == "call") {
             res.insert(i);
+        }
+    }
+
+    return res;
+}
+
+std::map<int, Elf64_Rela> getRelocIndexes(Assembly &code, std::vector<Elf64_Rela> &relocs) {
+    std::map<int, Elf64_Rela> res;
+
+    for (int i = 0; i < code.count; i++) {
+        cs_insn currInstr = code.insn[i];
+
+        if (i < code.count - 1) {
+            cs_insn nextInstr = code.insn[i + 1];
+
+            auto reloc = std::find_if(relocs.begin(), relocs.end(), [currInstr, nextInstr](Elf64_Rela &reloc) {
+               return reloc.r_offset >= currInstr.address && reloc.r_offset < nextInstr.address;
+            });
+
+            if (reloc != relocs.end()) {
+                res[i] = *reloc;
+            }
+
+        } else {
+            auto reloc = std::find_if(relocs.begin(), relocs.end(), [currInstr](Elf64_Rela &reloc) {
+                return reloc.r_offset >= currInstr.address;
+            });
+
+            if (reloc != relocs.end()) {
+                res[i] = *reloc;
+            }
         }
     }
 
