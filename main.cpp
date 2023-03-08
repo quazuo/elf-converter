@@ -32,22 +32,30 @@ public:
         size_t sectionsOffset = elfHeader.e_ehsize + sectionHeaders.size() * elfHeader.e_shentsize;
         size_t symtabOffset;
 
-        // save these instead of saving them
+        // save reloc tables for later
         std::map<size_t, std::vector<Elf64_Rela>> newRelocTables;
 
-        // generate stub section headers that will be filled in later // todo -- fill it with headers
+        // generate stub section headers that will be filled in later
         newFile.resize(sectionsOffset);
 
         size_t currOffset = 0;
+
         for (auto &sec: sectionHeaders) {
             size_t currSize = 0;
+
+            auto alignedOffset = alignOffset(currOffset, sec.sh_addralign);
+
+            if (alignedOffset != currOffset) {
+                newFile.resize(newFile.size() + alignedOffset - currOffset);
+                currOffset = alignedOffset;
+            }
 
             if (getSectionName(sec) == ".shstrtab") {
                 newFile.insert(newFile.end(), newShstrtab.begin(), newShstrtab.end());
                 currSize = newShstrtab.size();
 
             } else if (sec.sh_type == SHT_SYMTAB) {
-                symtabOffset = currOffset;
+                symtabOffset = sectionsOffset + currOffset;
                 currSize = symbols.size() * sizeof(Elf64_Sym); // ??? todo make sure this sizeof works
                 newFile.resize(newFile.size() + currSize);
 
@@ -55,6 +63,7 @@ public:
                 Assembly x86Code = disassemble(capstone.handle, sec.sh_offset, sec.sh_size);
 
                 // get relocations data
+                Elf64_Shdr relocsHeader = getRelocSecHdr(sec);
                 std::vector<Elf64_Rela> relocs = getRelocs(sec);
                 std::map<int, size_t> relocIndexes = getRelocIndexes(x86Code, relocs); // (indexOfInstr, indexOfReloc)
 
@@ -63,18 +72,25 @@ public:
                 std::set<int> calls = getCallIndexes(x86Code);
 
                 size_t currInstrOffset = 0;
+                size_t currFuncSize = 0, currFuncSymbolIndex;
                 std::vector<std::vector<std::string>> armCode{};
+
+                // todo - fiddle with symbols a bit (goofy ahh shits goin on here)
 
                 for (int i = 0; i < x86Code.count; i++) {
                     cs_insn currInstr = x86Code.insn[i];
                     InstrType type = getInstrType(currInstr);
 
                     if (type == PROLOGUE) {
+                        currFuncSize = 0;
+                        currFuncSymbolIndex = getFuncSymbolIndex(sec, currInstr.address);
+                        symbols[currFuncSymbolIndex].st_value = currInstrOffset;
+
                         i += x86Prologue.size() - 1;
 
-                        // todo - fiddle with symbols a bit (goofy ahh shits goin on here)
-
                     } else if (type == EPILOGUE) {
+                        symbols[currFuncSymbolIndex].st_size = currFuncSize + armEpilogue.size() * 4;
+
                         i += x86Epilogue.size() - 1;
                     }
 
@@ -86,6 +102,12 @@ public:
                         auto currRelocType = codeWithReloc.second;
                         Elf64_Rela *currReloc = &relocs[relocIndexes.at(i)];
 
+//                        std::cout << "\t\t\t\t!RELOC! "
+//                                  << std::hex << relocs[relocIndexes.at(i)].r_offset
+//                                  << " "
+//                                  << std::hex << currInstrOffset
+//                                  << "\n";
+
                         currReloc->r_info = ELF64_R_INFO(ELF64_R_SYM(currReloc->r_info), currRelocType);
                         currReloc->r_offset = currInstrOffset;
 
@@ -95,12 +117,6 @@ public:
 
                         if (currRelocType == R_AARCH64_NONE)
                             throw std::runtime_error("XD");
-
-//                        std::cout << "\t\t\t\t!RELOC! "
-//                                  << relocs[relocIndexes.at(i)].r_offset
-//                                  << " "
-//                                  << currInstrOffset
-//                                  << "\n";
 
                     } else {
                         currCode = convertOp(currInstr, i, jumps);
@@ -113,10 +129,10 @@ public:
                     }
 
                     currInstrOffset += 4 * currCode.size();
+                    currFuncSize += 4 * currCode.size();
                 }
 
                 std::string mergedCode;
-
                 for (auto &codeGroup: armCode) {
                     for (auto &line: codeGroup) {
                         mergedCode.append(line).append("\n");
@@ -130,27 +146,15 @@ public:
                     throw std::runtime_error("ks_asm failed on instruction " + mergedCode);
                 }
 
-                std::cout << mergedCode;
-
                 newFile.insert(newFile.end(), encode, encode + currSize);
-                ks_free(encode);
+                newRelocTables.emplace(alignOffset(sectionsOffset + currOffset + currSize, relocsHeader.sh_addralign), relocs);
 
-                newRelocTables.emplace(currOffset + currSize, relocs);
+                ks_free(encode);
 
             } else {
                 newFile.insert(newFile.end(), file.begin() + sec.sh_offset,
                                file.begin() + sec.sh_offset + sec.sh_size);
                 currSize = sec.sh_size;
-            }
-
-            // align
-            if (sec.sh_addralign) {
-                auto rem = currOffset % sec.sh_addralign;
-
-                if (rem != 0) {
-                    newFile.resize(newFile.size() + sec.sh_addralign - rem);
-                    currOffset += sec.sh_addralign - rem;
-                }
             }
 
             sec.sh_offset = sectionsOffset + currOffset;
@@ -186,20 +190,37 @@ public:
 
         // It is finished.
 
-
-
         // debug
-        for (int i = 0; i < 100; i++) {
-            std::cout << std::setfill('0') << std::setw(6) << std::hex << i * 16 << "\t";
-            for (int j = 0; j < 16; j += 2)
-                std::cout
-                    << std::setfill('0') << std::setw(2) << std::hex
-                    << (int) *((uint8_t *) &newFile[16 * i + j + 1])
-                    << std::setfill('0') << std::setw(2) << std::hex
-                    << (int) *((uint8_t *) &newFile[16 * i + j])
-                    << " ";
-            std::cout << "\n";
+        for (int i = 0; i < newFile.size(); i += 2) {
+
+            if (i % 16 == 0)
+                std::cout << "\n" << std::setfill('0') << std::setw(7) << std::hex << i << " ";
+
+            std::cout
+                << std::setfill('0') << std::setw(2) << std::hex
+                << (int) *((uint8_t *) &newFile[i + 1])
+                << std::setfill('0') << std::setw(2) << std::hex
+                << (int) *((uint8_t *) &newFile[i])
+                << " ";
         }
+
+        std::cout << "\n";
+
+
+
+
+        // emit file
+        std::ofstream handle(path, std::ios::binary);
+
+        if (handle.fail()) {
+            throw std::runtime_error("Could not open file");
+        }
+
+        for (auto c : newFile) {
+            handle << c;
+        }
+
+        handle.close();
     }
 
 private:
@@ -208,19 +229,51 @@ private:
     std::vector<Elf64_Shdr> sectionHeaders;
     std::vector<Elf64_Sym> symbols;
 
-    std::vector<Elf64_Rela> getRelocs(Elf64_Shdr &section) {
-        std::vector<Elf64_Rela> relocs;
+    size_t getFuncSymbolIndex(Elf64_Shdr &section, size_t offset) {
+        auto sectionIter = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [section](Elf64_Shdr &sec) {
+            return sec.sh_name == section.sh_name; // why the FUCK can i not do `sec == section`?????
+        });
 
+        auto sectionIndex = std::distance(sectionHeaders.begin(), sectionIter);
+
+        auto symbolIter = std::find_if(symbols.begin(), symbols.end(), [sectionIndex, offset](Elf64_Sym &sym) {
+            return sym.st_shndx == sectionIndex
+                && sym.st_value == offset
+                && ELF64_ST_TYPE(sym.st_info) == STT_FUNC;
+        });
+
+        return std::distance(symbols.begin(), symbolIter);
+    }
+
+    static size_t alignOffset(size_t offset, unsigned long alignment) {
+        if (alignment) {
+            auto rem = offset % alignment;
+
+            if (rem != 0) {
+                return offset + alignment - rem;
+            }
+        }
+
+        return offset;
+    }
+
+    Elf64_Shdr getRelocSecHdr(Elf64_Shdr &section) {
         auto relocSectionName = ".rela" + getSectionName(section);
         auto relocSecHdr = std::find_if(sectionHeaders.begin(), sectionHeaders.end(),
                                         [relocSectionName, this](Elf64_Shdr &s) {
                                             return getSectionName(s) == relocSectionName;
                                         });
+        return *relocSecHdr;
+    }
 
-        auto base = relocSecHdr->sh_offset;
+    std::vector<Elf64_Rela> getRelocs(Elf64_Shdr &section) {
+        std::vector<Elf64_Rela> relocs;
+        auto relocSecHdr = getRelocSecHdr(section);
+
+        auto base = relocSecHdr.sh_offset;
         auto offset = 0;
 
-        while (offset < relocSecHdr->sh_size) {
+        while (offset < relocSecHdr.sh_size) {
             Elf64_Rela reloc;
             std::copy_n(file.begin() + base + offset, sizeof(Elf64_Rela), (uint8_t *) &reloc);
             relocs.push_back(reloc);
