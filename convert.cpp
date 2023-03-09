@@ -5,16 +5,27 @@
 #include <vector>
 #include <elf.h>
 #include <functional>
+#include <iostream>
 
 #include "const.h"
 #include "struct.h"
 
-bool isReg(std::string &arg) {
+bool isReg(const std::string &arg) {
     return registerMap.count(arg) == 1;
 }
 
-bool isReg64(std::string &reg) {
+bool isReg64(const std::string &reg) {
     return reg[0] == 'r';
+}
+
+std::string regTo64(const std::string &reg) {
+    if (reg.ends_with('d')) {
+        return reg.substr(0, reg.length() - 1);
+    }
+
+    std::string ret = reg;
+    ret[0] = 'r';
+    return ret;
 }
 
 std::string convertReg(const std::string &reg) {
@@ -48,6 +59,13 @@ static std::pair<std::string, std::string> splitArgs(cs_insn instr) {
 }
 
 static std::tuple<std::string, char, std::string> splitMemAccess(std::string &mem) {
+    if (mem.find('+') == std::string::npos && mem.find('-') == std::string::npos) {
+        std::string base = mem.substr(mem.find('[') + 1);
+        base.erase(base.find(']'));
+
+        return {base, '+', "0"};
+    }
+
     std::string delim = mem.find('+') == std::string::npos ? " - " : " + ";
 
     auto base = mem.substr(mem.find('[') + 1, mem.find(delim) - mem.find('[') - 1);
@@ -80,7 +98,7 @@ InstrType getInstrType(cs_insn instr) {
         return MOV;
     if (op == "jmp")
         return JMP;
-    if (op.length() == 3 && op[0] == 'j') // todo - perhaps more elegant
+    if (op.length() <= 3 && op[0] == 'j') // todo - perhaps more elegant
         return JMPCOND;
 
     throw std::runtime_error("instruction " + op + " not supported");
@@ -119,32 +137,29 @@ static std::vector<std::string> convertSubOp(cs_insn instr) {
     return {convertArithmeticOp(instr, SUB)};
 }
 
-static CodeWithReloc generateMemAccess(std::string &arg, const std::string &dest) {
-    auto [base, sign, offset] = splitMemAccess(arg);
+static CodeWithReloc generateMemAccess(std::string &src, const std::string &dest) {
+    auto [base, sign, offset] = splitMemAccess(src);
 
     if (base == "rip") {
-        std::string instr1 = "ldr " + convertReg(base) + ", #0";
+        std::string instr1 = "ldr " + convertReg(dest) + ", #0";
         return {{instr1}, R_AARCH64_LD_PREL_LO19};
-
-        // todo - reloc
-
-    } else {
-        std::string instr1 = "mov " + tmp1_64 + ", " + (sign == '-' ? "-" : "") + offset;
-        std::string instr2 = "ldr " + convertReg(dest) + ", [" + convertReg(base) + ", " + tmp1_64 + "]";
-        return {{instr1, instr2}, R_AARCH64_NONE};
     }
+
+    auto newDest = isReg(dest) ? convertReg(dest) : dest;
+    std::string instr1 = "mov " + tmp1_64 + ", " + (sign == '-' ? "-" : "") + offset;
+    std::string instr2 = "ldr " + newDest + ", [" + convertReg(base) + ", " + tmp1_64 + "]";
+    return {{instr1, instr2}, R_AARCH64_NONE};
 }
 
 static CodeWithReloc convertCmpOp(cs_insn instr) {
     auto [arg1, arg2] = splitArgs(instr);
 
     if (arg1.find('[') != std::string::npos) { // cmp mem, reg/imm
-        auto [code, reloc] = generateMemAccess(arg1, tmp1_64);
-
-        std::string newArg1 = getAppropriateTemp1Reg(arg2);
+        std::string temp1 = getAppropriateTemp1Reg(arg2);
+        auto [code, reloc] = generateMemAccess(arg1, temp1);
         std::string newArg2 = isReg(arg2) ? convertReg(arg2) : arg2;
 
-        code.emplace_back("cmp " + newArg1 + ", " + newArg2);
+        code.emplace_back("cmp " + temp1 + ", " + newArg2);
         return {code, reloc};
     }
 
@@ -227,9 +242,9 @@ static CodeWithReloc convertMovOp(cs_insn instr) {
     // mov reg, reg/imm
 
     if (!isReg(arg2) /* && ma relokację */) {
-        arg1[0] = 'r';
+        auto arg1_64 = regTo64(arg1);
         return {
-            {"adr " + convertReg(arg1) + ", #0"},
+            {"adr " + convertReg(arg1_64) + ", #0"},
             R_AARCH64_ADR_PREL_LO21
         };
     }
@@ -252,7 +267,7 @@ static std::vector<std::string> convertCondJmpOp(cs_insn instr, int offset) {
         mnemo = std::string(instr.mnemonic);
         cond = conditionMap.at(mnemo.substr(1));
     } catch (std::exception &e) {
-        throw std::runtime_error("conditional jump j" + mnemo + " not supported");
+        throw std::runtime_error("conditional jump with mnemo: " + mnemo + "and cond: " + cond + " not supported");
     }
 
     return {"b." + cond + " " + std::to_string(offset)};

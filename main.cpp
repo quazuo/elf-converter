@@ -56,7 +56,7 @@ public:
 
             } else if (sec.sh_type == SHT_SYMTAB) {
                 symtabOffset = sectionsOffset + currOffset;
-                currSize = symbols.size() * sizeof(Elf64_Sym); // ??? todo make sure this sizeof works
+                currSize = symbols.size() * sizeof(Elf64_Sym);
                 newFile.resize(newFile.size() + currSize);
 
             } else if (sec.sh_flags & SHF_EXECINSTR) {
@@ -74,8 +74,6 @@ public:
                 size_t currInstrOffset = 0;
                 size_t currFuncSize = 0, currFuncSymbolIndex;
                 std::vector<std::vector<std::string>> armCode{};
-
-                // todo - fiddle with symbols a bit (goofy ahh shits goin on here)
 
                 for (int i = 0; i < x86Code.count; i++) {
                     cs_insn currInstr = x86Code.insn[i];
@@ -124,9 +122,9 @@ public:
 
                     armCode.push_back(currCode);
 
-                    for (auto &str: currCode) {
-                        std::cout << currInstrOffset << "\t" << str << "\n";
-                    }
+//                    for (auto &str: currCode) {
+//                        std::cout << currInstrOffset << "\t" << str << "\n";
+//                    }
 
                     currInstrOffset += 4 * currCode.size();
                     currFuncSize += 4 * currCode.size();
@@ -141,15 +139,23 @@ public:
 
                 unsigned char *encode;
                 size_t count;
+                int retcode = ks_asm(keystone.handle, mergedCode.c_str(), currOffset, &encode, &currSize, &count);
 
-                if (ks_asm(keystone.handle, mergedCode.c_str(), currOffset, &encode, &currSize, &count)) {
-                    throw std::runtime_error("ks_asm failed on instruction " + mergedCode);
+                if (retcode) {
+                    throw std::runtime_error("ks_asm FAILED on instruction " + mergedCode + " with code " + std::to_string(ks_errno(keystone.handle)));
                 }
 
                 newFile.insert(newFile.end(), encode, encode + currSize);
                 newRelocTables.emplace(alignOffset(sectionsOffset + currOffset + currSize, relocsHeader.sh_addralign), relocs);
 
                 ks_free(encode);
+
+            } else if (sec.sh_type == SHT_RELA && !(sectionHeaders[sec.sh_info].sh_flags & SHF_EXECINSTR)) {
+                std::vector<Elf64_Rela> relocs = getRelocs(sec);
+                std::cout << getSectionName(sec);
+                for (auto &reloc : relocs) {
+                    std::cout << reloc.r_info << "\n";
+                }
 
             } else {
                 newFile.insert(newFile.end(), file.begin() + sec.sh_offset,
@@ -191,20 +197,20 @@ public:
         // It is finished.
 
         // debug
-        for (int i = 0; i < newFile.size(); i += 2) {
-
-            if (i % 16 == 0)
-                std::cout << "\n" << std::setfill('0') << std::setw(7) << std::hex << i << " ";
-
-            std::cout
-                << std::setfill('0') << std::setw(2) << std::hex
-                << (int) *((uint8_t *) &newFile[i + 1])
-                << std::setfill('0') << std::setw(2) << std::hex
-                << (int) *((uint8_t *) &newFile[i])
-                << " ";
-        }
-
-        std::cout << "\n";
+//        for (int i = 0; i < newFile.size(); i += 2) {
+//
+//            if (i % 16 == 0)
+//                std::cout << "\n" << std::setfill('0') << std::setw(7) << std::hex << i << " ";
+//
+//            std::cout
+//                << std::setfill('0') << std::setw(2) << std::hex
+//                << (int) *((uint8_t *) &newFile[i + 1])
+//                << std::setfill('0') << std::setw(2) << std::hex
+//                << (int) *((uint8_t *) &newFile[i])
+//                << " ";
+//        }
+//
+//        std::cout << "\n";
 
 
 
@@ -334,15 +340,16 @@ private:
 
         // fix links in section headers
         size_t symtabIndex = 0;
-        size_t strtabIndex = 0;
 
         while (sectionHeaders[symtabIndex].sh_type != SHT_SYMTAB) {
             symtabIndex++;
         }
 
-        while (sectionHeaders[strtabIndex].sh_type != SHT_STRTAB) {
-            strtabIndex++;
-        }
+        auto strtabIter = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this](Elf64_Shdr &sec) {
+            return getSectionName(sec) == ".strtab";
+        });
+
+        auto strtabIndex = std::distance(sectionHeaders.begin(), strtabIter);
 
         std::for_each(sectionHeaders.begin(), sectionHeaders.end(), [symtabIndex, strtabIndex](Elf64_Shdr &sec) {
             if (sec.sh_type == SHT_RELA) {
@@ -403,8 +410,11 @@ private:
     };
 
     Assembly disassemble(csh &handle, size_t offset, size_t size) {
-        cs_insn *insn;
+        if (size == 0) {
+            return { nullptr, 0 };
+        }
 
+        cs_insn *insn;
         size_t count = cs_disasm(handle, &file[offset], size, 0, 0, &insn);
 
         if (count <= 0) {
@@ -413,11 +423,11 @@ private:
         }
 
         // todo - debug
-        size_t j;
-        for (j = 0; j < count; j++) {
-            printf("0x%" PRIx64 ":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,
-                   insn[j].op_str);
-        }
+//        size_t j;
+//        for (j = 0; j < count; j++) {
+//            printf("0x%" PRIx64 ":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,
+//                   insn[j].op_str);
+//        }
 
         return {insn, count};
     }
@@ -445,8 +455,6 @@ int main(int argc, char *argv[]) {
 
     ElfConverter converter(file);
     converter.convert(argv[2]);
-
-    std::cout << "File converted successfully\n";
 
     return 0;
 }
