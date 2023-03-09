@@ -28,7 +28,7 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, std::map<int, 
 
 CodeWithReloc convertOpWithReloc(cs_insn instr);
 
-std::map<int, int> getArmJumps(Assembly &code);
+std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndexes, KeystoneWrapper &keystone);
 
 std::set<int> getCallIndexes(Assembly &code);
 

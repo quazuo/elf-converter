@@ -68,7 +68,7 @@ public:
                 std::map<int, size_t> relocIndexes = getRelocIndexes(x86Code, relocs); // (indexOfInstr, indexOfReloc)
 
                 // helper data
-                std::map<int, int> jumps = getArmJumps(x86Code);
+                std::map<int, int> jumps = getArmJumps(x86Code, relocIndexes, keystone);
                 std::set<int> calls = getCallIndexes(x86Code);
 
                 size_t currInstrOffset = 0;
@@ -122,9 +122,10 @@ public:
 
                     armCode.push_back(currCode);
 
-//                    for (auto &str: currCode) {
-//                        std::cout << currInstrOffset << "\t" << str << "\n";
-//                    }
+                    for (auto &str: currCode) {
+                        std::cout << currInstrOffset << "\t" << str << "\n";
+                    }
+                    std::cout << "\n";
 
                     currInstrOffset += 4 * currCode.size();
                     currFuncSize += 4 * currCode.size();
@@ -152,10 +153,17 @@ public:
 
             } else if (sec.sh_type == SHT_RELA && !(sectionHeaders[sec.sh_info].sh_flags & SHF_EXECINSTR)) {
                 std::vector<Elf64_Rela> relocs = getRelocs(sec);
-                std::cout << getSectionName(sec);
+//
+//                std::cout << getSectionName(sec);
+//                for (auto &reloc : relocs) {
+//                    std::cout << reloc.r_info << "\n";
+//                }
+
                 for (auto &reloc : relocs) {
-                    std::cout << reloc.r_info << "\n";
+                    reloc.r_info = ELF64_R_INFO(ELF64_R_SYM(reloc.r_info), R_AARCH64_ABS64);
                 }
+
+                newRelocTables.emplace(currOffset, relocs);
 
             } else {
                 newFile.insert(newFile.end(), file.begin() + sec.sh_offset,

@@ -6,6 +6,7 @@
 #include <elf.h>
 #include <functional>
 #include <iostream>
+#include <sstream>
 
 #include "const.h"
 #include "struct.h"
@@ -257,10 +258,14 @@ static CodeWithReloc convertMovOp(cs_insn instr) {
 }
 
 static std::vector<std::string> convertJmpOp(cs_insn instr, int offset) {
+    // std::cout << "OFFSET " << offset << "\n";
+
     return {"b " + std::to_string(offset)};
 }
 
 static std::vector<std::string> convertCondJmpOp(cs_insn instr, int offset) {
+    // std::cout << "OFFSETc " << offset << "\n";
+
     std::string cond, mnemo;
 
     try {
@@ -335,31 +340,62 @@ CodeWithReloc convertOpWithReloc(cs_insn instr) {
     return codeWithReloc;
 }
 
-std::map<int, int> getArmJumps(Assembly &code) {
+std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndexes, KeystoneWrapper &keystone) {
     std::map<int, int> res{};
+
+    std::map<int, int> dummyJumps; // for convertOp
+    std::map<int, int> instrIndexMapping; // (index of x86 instruction) -> (index of arm instruction)
+    int currSize = 0;
+
+    for (int i = 0; i < code.count; i++) {
+        cs_insn currInstr = code.insn[i];
+        InstrType type = getInstrType(currInstr);
+
+        instrIndexMapping.emplace(i, currSize);
+
+        std::vector<std::string> currCode;
+
+        if (relocIndexes.contains(i)) {
+            auto codeWithReloc = convertOpWithReloc(currInstr);
+            currCode = codeWithReloc.first;
+        } else {
+            currCode = convertOp(currInstr, i, dummyJumps);
+        }
+
+        if (type == PROLOGUE) {
+            i += x86Prologue.size() - 1;
+
+        } else if (type == EPILOGUE) {
+            i += x86Epilogue.size() - 1;
+        }
+
+        currSize += currCode.size();
+    }
 
     for (int i = 0; i < code.count; i++) {
         auto currInstr = code.insn[i];
 
-        if (std::string(currInstr.mnemonic) != "jmp") {
+        if (currInstr.mnemonic[0] != 'j') {
             continue;
         }
 
-        int offset = std::stoi(std::string(currInstr.op_str));
-        size_t destAddr = currInstr.address + offset;
-        int j; // index of this jump's destination instruction
+        int dest;
+        std::stringstream ss;
+        ss << std::hex << currInstr.op_str;
+        ss >> dest;
 
-        for (j = 0; j < code.count; j++) {
-            if (code.insn[j].address == destAddr) {
-                break;
-            }
+        int j = 0; // index of this jump's destination instruction
+
+        while (code.insn[j].address != dest) {
+            j++;
         }
 
         if (j == code.count) {
             throw std::runtime_error("you dun fucked up !!! in: " + std::string(__FUNCTION__));
         }
 
-        res.emplace(i, 4 * (j - i));
+        // res.emplace(i, 4 * (instrIndexMapping.at(j) - instrIndexMapping.at(i)));
+        res.emplace(i, 4 * (instrIndexMapping.at(j)));
     }
 
     return res;
