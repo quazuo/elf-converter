@@ -105,7 +105,7 @@ InstrType getInstrType(cs_insn instr) {
     throw std::runtime_error("instruction " + op + " not supported");
 }
 
-static std::string convertArithmeticOp(cs_insn instr, InstrType type) {
+static std::vector<std::string> convertArithmeticOp(cs_insn instr) {
     std::string args = instr.op_str;
     std::string delim = ", ";
     std::string arg1 = args.substr(0, args.find(delim));
@@ -114,42 +114,27 @@ static std::string convertArithmeticOp(cs_insn instr, InstrType type) {
     std::string newArg1 = convertReg(arg1);
     std::string newArg2 = isReg(arg2) ? convertReg(arg2) : arg2;
 
-    std::string mnemo;
-
-    switch (type) {
-        case ADD:
-            mnemo = "add";
-            break;
-        case SUB:
-            mnemo = "sub";
-            break;
-        default:
-            throw std::runtime_error("invalid instr type in " + std::string(__FUNCTION__));
-    }
-
-    return mnemo + " " + newArg1 + ", " + newArg1 + ", " + newArg2;
-}
-
-static std::vector<std::string> convertAddOp(cs_insn instr) {
-    return {convertArithmeticOp(instr, ADD)};
-}
-
-static std::vector<std::string> convertSubOp(cs_insn instr) {
-    return {convertArithmeticOp(instr, SUB)};
+    return {std::string(instr.mnemonic) + " " + newArg1 + ", " + newArg1 + ", " + newArg2};
 }
 
 static CodeWithReloc generateMemAccess(std::string &src, const std::string &dest) {
     auto [base, sign, offset] = splitMemAccess(src);
 
     if (base == "rip") {
-        std::string instr1 = "ldr " + convertReg(dest) + ", #0";
-        return {{instr1}, R_AARCH64_LD_PREL_LO19};
+        return {
+            {"ldr " + convertReg(dest) + ", #0"},
+            R_AARCH64_LD_PREL_LO19
+        };
     }
 
     auto newDest = isReg(dest) ? convertReg(dest) : dest;
-    std::string instr1 = "mov " + tmp1_64 + ", " + (sign == '-' ? "-" : "") + offset;
-    std::string instr2 = "ldr " + newDest + ", [" + convertReg(base) + ", " + tmp1_64 + "]";
-    return {{instr1, instr2}, R_AARCH64_NONE};
+    return {
+        {
+            "mov " + tmp1_64 + ", " + (sign == '-' ? "-" : "") + offset,
+            "ldr " + newDest + ", [" + convertReg(base) + ", " + tmp1_64 + "]"
+        },
+        R_AARCH64_NONE
+    };
 }
 
 static CodeWithReloc convertCmpOp(cs_insn instr) {
@@ -286,10 +271,10 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, std::map<int, 
             code = armEpilogue;
             break;
         case ADD:
-            code = convertAddOp(instr);
+            code = convertArithmeticOp(instr);
             break;
         case SUB:
-            code = convertSubOp(instr);
+            code = convertArithmeticOp(instr);
             break;
         case CMP:
             codeWithReloc = convertCmpOp(instr);
