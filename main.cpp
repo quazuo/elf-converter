@@ -65,7 +65,7 @@ public:
                 // get relocations data
                 Elf64_Shdr relocsHeader = getRelocSecHdr(sec);
                 std::vector<Elf64_Rela> relocs = getRelocs(sec);
-                std::map<int, size_t> relocIndexes = getRelocIndexes(x86Code, relocs); // (indexOfInstr, indexOfReloc)
+                std::map<int, size_t> relocIndexes = getRelocIndexes(x86Code, relocs); // indexOfInstr -> indexOfReloc
 
                 // helper data
                 std::map<int, int> jumps = getArmJumps(x86Code, relocIndexes, keystone);
@@ -99,12 +99,6 @@ public:
                         currCode = codeWithReloc.first;
                         auto currRelocType = codeWithReloc.second;
                         Elf64_Rela *currReloc = &relocs[relocIndexes.at(i)];
-
-//                        std::cout << "\t\t\t\t!RELOC! "
-//                                  << std::hex << relocs[relocIndexes.at(i)].r_offset
-//                                  << " "
-//                                  << std::hex << currInstrOffset
-//                                  << "\n";
 
                         currReloc->r_info = ELF64_R_INFO(ELF64_R_SYM(currReloc->r_info), currRelocType);
                         currReloc->r_offset = currInstrOffset;
@@ -153,17 +147,16 @@ public:
 
             } else if (sec.sh_type == SHT_RELA && !(sectionHeaders[sec.sh_info].sh_flags & SHF_EXECINSTR)) {
                 std::vector<Elf64_Rela> relocs = getRelocs(sec);
-//
-//                std::cout << getSectionName(sec);
-//                for (auto &reloc : relocs) {
-//                    std::cout << reloc.r_info << "\n";
-//                }
 
                 for (auto &reloc : relocs) {
                     reloc.r_info = ELF64_R_INFO(ELF64_R_SYM(reloc.r_info), R_AARCH64_ABS64);
                 }
 
                 newRelocTables.emplace(currOffset, relocs);
+
+            } else if (sec.sh_type == SHT_NOBITS) {
+                sec.sh_offset = sectionsOffset + currOffset;
+                continue;
 
             } else {
                 newFile.insert(newFile.end(), file.begin() + sec.sh_offset,

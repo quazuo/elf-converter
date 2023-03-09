@@ -190,7 +190,7 @@ static CodeWithReloc convertCallOp(cs_insn instr) {
     };
 }
 
-static CodeWithReloc convertMovOp(cs_insn instr) {
+static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc) {
     auto [arg1, arg2] = splitArgs(instr);
 
     if (arg1.find('[') != std::string::npos) { // mov mem, reg/imm
@@ -209,7 +209,7 @@ static CodeWithReloc convertMovOp(cs_insn instr) {
             };
 
         } else {
-            if (!isReg(arg2) /* && ma relokację */) {
+            if (!isReg(arg2) && withReloc) {
                 return {
                     {
                         "adr " + tmp1_64 + ", #0",
@@ -233,7 +233,6 @@ static CodeWithReloc convertMovOp(cs_insn instr) {
                 R_AARCH64_NONE
             };
         }
-
     }
 
     if (arg2.find('[') != std::string::npos) { // mov reg, mem
@@ -242,7 +241,7 @@ static CodeWithReloc convertMovOp(cs_insn instr) {
 
     // mov reg, reg/imm
 
-    if (!isReg(arg2) /* && ma relokację */) {
+    if (!isReg(arg2) && withReloc) {
         auto arg1_64 = regTo64(arg1);
         return {
             {"adr " + convertReg(arg1_64) + ", #0"},
@@ -258,14 +257,10 @@ static CodeWithReloc convertMovOp(cs_insn instr) {
 }
 
 static std::vector<std::string> convertJmpOp(cs_insn instr, int offset) {
-    // std::cout << "OFFSET " << offset << "\n";
-
     return {"b " + std::to_string(offset)};
 }
 
 static std::vector<std::string> convertCondJmpOp(cs_insn instr, int offset) {
-    // std::cout << "OFFSETc " << offset << "\n";
-
     std::string cond, mnemo;
 
     try {
@@ -305,7 +300,7 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, std::map<int, 
             code = codeWithReloc.first;
             break;
         case MOV:
-            codeWithReloc = convertMovOp(instr);
+            codeWithReloc = convertMovOp(instr, false);
             code = codeWithReloc.first;
             break;
         case JMP:
@@ -331,7 +326,7 @@ CodeWithReloc convertOpWithReloc(cs_insn instr) {
             codeWithReloc = convertCallOp(instr);
             break;
         case MOV:
-            codeWithReloc = convertMovOp(instr);
+            codeWithReloc = convertMovOp(instr, true);
             break;
         default:
             throw std::runtime_error("unexpected operation in " + std::string(__FUNCTION__));
@@ -394,7 +389,6 @@ std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndex
             throw std::runtime_error("you dun fucked up !!! in: " + std::string(__FUNCTION__));
         }
 
-        // res.emplace(i, 4 * (instrIndexMapping.at(j) - instrIndexMapping.at(i)));
         res.emplace(i, 4 * (instrIndexMapping.at(j)));
     }
 
