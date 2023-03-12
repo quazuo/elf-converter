@@ -95,7 +95,7 @@ public:
                     std::vector<std::string> currCode;
 
                     if (relocIndexes.contains(i)) {
-                        auto codeWithReloc = convertOpWithReloc(currInstr);
+                        auto codeWithReloc = convertOpWithReloc(currInstr, currInstrOffset);
                         currCode = codeWithReloc.first;
                         auto currRelocType = codeWithReloc.second;
                         Elf64_Rela *currReloc = &relocs[relocIndexes.at(i)];
@@ -103,23 +103,29 @@ public:
                         currReloc->r_info = ELF64_R_INFO(ELF64_R_SYM(currReloc->r_info), currRelocType);
                         currReloc->r_offset = currInstrOffset;
 
-                        if (currRelocType == R_AARCH64_CALL26) {
-                            currReloc->r_addend = 0;
+                        // fix addend
+                        std::string args = currInstr.op_str;
+                        const char *rip = "rip";
+                        auto iter = std::search(args.begin(), args.end(), rip, rip + strlen(rip));
+                        bool isRipAddressed = iter != args.end();
+
+                        if (currRelocType == R_AARCH64_CALL26 || isRipAddressed) {
+                            currReloc->r_addend += 4;
                         }
 
                         if (currRelocType == R_AARCH64_NONE)
                             throw std::runtime_error("XD");
 
                     } else {
-                        currCode = convertOp(currInstr, i, jumps);
+                        currCode = convertOp(currInstr, i, currInstrOffset, jumps);
                     }
 
                     armCode.push_back(currCode);
 
-                    for (auto &str: currCode) {
-                        std::cout << currInstrOffset << "\t" << str << "\n";
-                    }
-                    std::cout << "\n";
+//                    for (auto &str: currCode) {
+//                        std::cout << currInstrOffset << "\t" << str << "\n";
+//                    }
+//                    std::cout << "\n";
 
                     currInstrOffset += 4 * currCode.size();
                     currFuncSize += 4 * currCode.size();
@@ -272,6 +278,34 @@ private:
     // conversion
 
     void removeUselessSections() {
+        // remove references to useless sections in the symbol table
+
+//        std::erase_if(symbols, [this](Elf64_Sym &sym) {
+//            if (ELF64_ST_TYPE(sym.st_info) != STT_SECTION) {
+//                return false;
+//            }
+//
+//            std::string name = getSectionName(sectionHeaders[sym.st_shndx]);
+//            return isUselessSectionName(name);
+//        });
+//
+//        // remember which sections were referred to by STT_SECTION symbols
+//
+//        std::map<int, std::string> symbolSecNames;
+//
+//        for (int i = 0; i < symbols.size(); i++) {
+//            const auto sym = symbols[i];
+//
+//            if (sym.st_shndx < 0 || sym.st_shndx >= sectionHeaders.size()) {
+//                continue;
+//            }
+//
+//            std::string name = getSectionName(sectionHeaders[sym.st_shndx]);
+//            symbolSecNames.emplace(i, name);
+//        }
+
+        // remove the sections
+
         auto erasedCount = std::erase_if(sectionHeaders, [this](Elf64_Shdr &section) {
             return isUselessSectionName(getSectionName(section));
         });
@@ -279,6 +313,7 @@ private:
         elfHeader.e_shnum -= erasedCount;
 
         // fix links in section headers
+
         size_t symtabIndex = 0;
 
         while (sectionHeaders[symtabIndex].sh_type != SHT_SYMTAB) {
@@ -291,13 +326,30 @@ private:
 
         auto strtabIndex = std::distance(sectionHeaders.begin(), strtabIter);
 
-        std::for_each(sectionHeaders.begin(), sectionHeaders.end(), [symtabIndex, strtabIndex](Elf64_Shdr &sec) {
+        for (auto &sec : sectionHeaders) {
             if (sec.sh_type == SHT_RELA) {
                 sec.sh_link = symtabIndex;
+
             } else if (sec.sh_type == SHT_SYMTAB) {
                 sec.sh_link = strtabIndex;
             }
-        });
+        }
+
+        // fix symbols
+
+//        for (int i = 0; i < symbols.size(); i++) {
+//            if (!symbolSecNames.contains(i)) {
+//                continue;
+//            }
+//
+//            const auto name = symbolSecNames.at(i);
+//
+//            auto iter = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this, name](Elf64_Shdr &sec) {
+//                return getSectionName(sec) == name;
+//            });
+//
+//            symbols[i].st_shndx = std::distance(sectionHeaders.begin(), iter);
+//        }
     }
 
     std::vector<uint8_t> fixSectionNameTable() {
@@ -321,15 +373,15 @@ private:
             i += currName.length() + 1;
         }
 
-        std::for_each(sectionHeaders.begin(), sectionHeaders.end(), [res, this](Elf64_Shdr &sec) {
+        for (auto &sec : sectionHeaders) {
             if (sec.sh_type == SHT_NULL) {
-                return;
+                continue;
             }
 
             auto name = getSectionName(sec);
             auto it = std::search(res.begin(), res.end(), name.begin(), name.end());
             sec.sh_name = std::distance(res.begin(), it);
-        });
+        }
 
         return res;
     }
@@ -460,7 +512,6 @@ void convert(const char *src, const char *dest) {
 
     ElfConverter converter(file);
     converter.convert(dest);
-
 }
 
 int main(int argc, char *argv[]) {

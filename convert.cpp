@@ -117,12 +117,17 @@ static std::vector<std::string> convertArithmeticOp(cs_insn instr) {
     return {std::string(instr.mnemonic) + " " + newArg1 + ", " + newArg1 + ", " + newArg2};
 }
 
-static CodeWithReloc generateMemAccess(std::string &src, const std::string &dest) {
+static CodeWithReloc generateMemAccess(std::string &src, const std::string &dest, int currOffset) {
     auto [base, sign, offset] = splitMemAccess(src);
+
+    std::string off;
+    std::stringstream ss;
+    ss << currOffset;
+    ss >> std::hex >> off;
 
     if (base == "rip") {
         return {
-            {"ldr " + convertReg(dest) + ", #0"},
+            {"ldr " + convertReg(dest) + ", " + off}, // `off` instead of 0 bcs who the f knows
             R_AARCH64_LD_PREL_LO19
         };
     }
@@ -137,12 +142,12 @@ static CodeWithReloc generateMemAccess(std::string &src, const std::string &dest
     };
 }
 
-static CodeWithReloc convertCmpOp(cs_insn instr) {
+static CodeWithReloc convertCmpOp(cs_insn instr, int currOffset) {
     auto [arg1, arg2] = splitArgs(instr);
 
     if (arg1.find('[') != std::string::npos) { // cmp mem, reg/imm
         std::string temp1 = getAppropriateTemp1Reg(arg2);
-        auto [code, reloc] = generateMemAccess(arg1, temp1);
+        auto [code, reloc] = generateMemAccess(arg1, temp1, currOffset);
         std::string newArg2 = isReg(arg2) ? convertReg(arg2) : arg2;
 
         code.emplace_back("cmp " + temp1 + ", " + newArg2);
@@ -150,7 +155,7 @@ static CodeWithReloc convertCmpOp(cs_insn instr) {
     }
 
     if (arg2.find('[') != std::string::npos) { // cmp reg, mem
-        auto [code, reloc] = generateMemAccess(arg2, tmp1_64);
+        auto [code, reloc] = generateMemAccess(arg2, tmp1_64, currOffset);
 
         std::string newArg1 = convertReg(arg1);
         std::string newArg2 = getAppropriateTemp1Reg(arg1);
@@ -175,7 +180,7 @@ static CodeWithReloc convertCallOp(cs_insn instr) {
     };
 }
 
-static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc) {
+static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc, int currOffset) {
     auto [arg1, arg2] = splitArgs(instr);
 
     if (arg1.find('[') != std::string::npos) { // mov mem, reg/imm
@@ -186,7 +191,7 @@ static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc) {
 
             return {
                 {
-                    "adr " + tmp1_64 + ", #0",
+                    "adr " + tmp1_64 + ", 0",
                     "mov " + tmp2 + ", " + arg2,
                     "str " + tmp2 + ", [" + tmp1_64 + "]"
                 },
@@ -197,8 +202,8 @@ static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc) {
             if (!isReg(arg2) && withReloc) {
                 return {
                     {
-                        "adr " + tmp1_64 + ", #0",
-                        "mov " + tmp2_64 + ", " + offset,
+                        "adr " + tmp1_64 + ", 0",
+                        "mov " + tmp2_64 + ", " + (sign == '-' ? "-" : "") + offset,
                         "str " + tmp1_64 + ", [" + convertReg(base) + ", " + tmp2_64 + "]"
                         // todo - tmp1_64 w trzeciej linijce powinno byc pewnie jakims tam tmp1 (?)
                     },
@@ -221,7 +226,7 @@ static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc) {
     }
 
     if (arg2.find('[') != std::string::npos) { // mov reg, mem
-        return generateMemAccess(arg2, arg1);
+        return generateMemAccess(arg2, arg1, currOffset);
     }
 
     // mov reg, reg/imm
@@ -229,7 +234,7 @@ static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc) {
     if (!isReg(arg2) && withReloc) {
         auto arg1_64 = regTo64(arg1);
         return {
-            {"adr " + convertReg(arg1_64) + ", #0"},
+            {"adr " + convertReg(arg1_64) + ", 0"},
             R_AARCH64_ADR_PREL_LO21
         };
     }
@@ -258,7 +263,7 @@ static std::vector<std::string> convertCondJmpOp(cs_insn instr, int offset) {
     return {"b." + cond + " " + std::to_string(offset)};
 }
 
-std::vector<std::string> convertOp(cs_insn instr, int instrIndex, std::map<int, int> &jumps) {
+std::vector<std::string> convertOp(cs_insn instr, int instrIndex, int currOffset, std::map<int, int> &jumps) {
     InstrType type = getInstrType(instr);
     std::vector<std::string> code;
     CodeWithReloc codeWithReloc;
@@ -271,13 +276,11 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, std::map<int, 
             code = armEpilogue;
             break;
         case ADD:
-            code = convertArithmeticOp(instr);
-            break;
         case SUB:
             code = convertArithmeticOp(instr);
             break;
         case CMP:
-            codeWithReloc = convertCmpOp(instr);
+            codeWithReloc = convertCmpOp(instr, currOffset);
             code = codeWithReloc.first;
             break;
         case CALL:
@@ -285,7 +288,7 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, std::map<int, 
             code = codeWithReloc.first;
             break;
         case MOV:
-            codeWithReloc = convertMovOp(instr, false);
+            codeWithReloc = convertMovOp(instr, false, currOffset);
             code = codeWithReloc.first;
             break;
         case JMP:
@@ -299,19 +302,19 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, std::map<int, 
     return code;
 }
 
-CodeWithReloc convertOpWithReloc(cs_insn instr) {
+CodeWithReloc convertOpWithReloc(cs_insn instr, int currOffset) {
     InstrType type = getInstrType(instr);
     CodeWithReloc codeWithReloc;
 
     switch (type) {
         case CMP:
-            codeWithReloc = convertCmpOp(instr);
+            codeWithReloc = convertCmpOp(instr, currOffset);
             break;
         case CALL:
             codeWithReloc = convertCallOp(instr);
             break;
         case MOV:
-            codeWithReloc = convertMovOp(instr, true);
+            codeWithReloc = convertMovOp(instr, true, currOffset);
             break;
         default:
             throw std::runtime_error("unexpected operation in " + std::string(__FUNCTION__));
@@ -336,10 +339,10 @@ std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndex
         std::vector<std::string> currCode;
 
         if (relocIndexes.contains(i)) {
-            auto codeWithReloc = convertOpWithReloc(currInstr);
+            auto codeWithReloc = convertOpWithReloc(currInstr, 0);
             currCode = codeWithReloc.first;
         } else {
-            currCode = convertOp(currInstr, i, dummyJumps);
+            currCode = convertOp(currInstr, i, 0, dummyJumps);
         }
 
         if (type == PROLOGUE) {
