@@ -236,73 +236,10 @@ private:
     std::vector<Elf64_Shdr> sectionHeaders;
     std::vector<Elf64_Sym> symbols;
 
-    size_t getFuncSymbolIndex(Elf64_Shdr &section, size_t offset) {
-        auto sectionIter = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [section](Elf64_Shdr &sec) {
-            return sec.sh_name == section.sh_name; // why the FUCK can i not do `sec == section`?????
-        });
-
-        auto sectionIndex = std::distance(sectionHeaders.begin(), sectionIter);
-
-        auto symbolIter = std::find_if(symbols.begin(), symbols.end(), [sectionIndex, offset](Elf64_Sym &sym) {
-            return sym.st_shndx == sectionIndex
-                && sym.st_value == offset
-                && ELF64_ST_TYPE(sym.st_info) == STT_FUNC;
-        });
-
-        return std::distance(symbols.begin(), symbolIter);
-    }
-
-    static size_t alignOffset(size_t offset, unsigned long alignment) {
-        if (alignment) {
-            auto rem = offset % alignment;
-
-            if (rem != 0) {
-                return offset + alignment - rem;
-            }
-        }
-
-        return offset;
-    }
-
-    Elf64_Shdr getRelocSecHdr(Elf64_Shdr &section) {
-        auto relocSectionName = ".rela" + getSectionName(section);
-        auto relocSecHdr = std::find_if(sectionHeaders.begin(), sectionHeaders.end(),
-                                        [relocSectionName, this](Elf64_Shdr &s) {
-                                            return getSectionName(s) == relocSectionName;
-                                        });
-        return *relocSecHdr;
-    }
-
-    std::vector<Elf64_Rela> getRelocs(Elf64_Shdr &section) {
-        std::vector<Elf64_Rela> relocs;
-        auto relocSecHdr = getRelocSecHdr(section);
-
-        auto base = relocSecHdr.sh_offset;
-        auto offset = 0;
-
-        while (offset < relocSecHdr.sh_size) {
-            Elf64_Rela reloc;
-            std::copy_n(file.begin() + base + offset, sizeof(Elf64_Rela), (uint8_t *) &reloc);
-            relocs.push_back(reloc);
-            offset += sizeof(Elf64_Rela);
-        }
-
-        return relocs;
-    }
+    // parsing
 
     void parseElfHeader() {
         std::copy_n(file.begin(), sizeof elfHeader, (uint8_t *) &elfHeader);
-    }
-
-    void fixElfHeader() {
-        elfHeader.e_machine = EM_AARCH64;
-        elfHeader.e_shoff = elfHeader.e_ehsize;
-
-        auto shstrtabIter = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this](Elf64_Shdr &sec) {
-            return getSectionName(sec) == ".shstrtab";
-        });
-
-        elfHeader.e_shstrndx = std::distance(sectionHeaders.begin(), shstrtabIter);
     }
 
     void parseSectionHeaders() {
@@ -331,6 +268,8 @@ private:
             symbols.push_back(symbol);
         }
     }
+
+    // conversion
 
     void removeUselessSections() {
         auto erasedCount = std::erase_if(sectionHeaders, [this](Elf64_Shdr &section) {
@@ -395,6 +334,61 @@ private:
         return res;
     }
 
+    void fixElfHeader() {
+        elfHeader.e_machine = EM_AARCH64;
+        elfHeader.e_shoff = elfHeader.e_ehsize;
+
+        auto shstrtabIter = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this](Elf64_Shdr &sec) {
+            return getSectionName(sec) == ".shstrtab";
+        });
+
+        elfHeader.e_shstrndx = std::distance(sectionHeaders.begin(), shstrtabIter);
+    }
+
+    // section utils
+
+    size_t getFuncSymbolIndex(Elf64_Shdr &section, size_t offset) {
+        auto sectionIter = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [section](Elf64_Shdr &sec) {
+            return sec.sh_name == section.sh_name; // why the FUCK can i not do `sec == section`?????
+        });
+
+        auto sectionIndex = std::distance(sectionHeaders.begin(), sectionIter);
+
+        auto symbolIter = std::find_if(symbols.begin(), symbols.end(), [sectionIndex, offset](Elf64_Sym &sym) {
+            return sym.st_shndx == sectionIndex
+                && sym.st_value == offset
+                && ELF64_ST_TYPE(sym.st_info) == STT_FUNC;
+        });
+
+        return std::distance(symbols.begin(), symbolIter);
+    }
+
+    Elf64_Shdr getRelocSecHdr(Elf64_Shdr &section) {
+        auto relocSectionName = ".rela" + getSectionName(section);
+        auto relocSecHdr = std::find_if(sectionHeaders.begin(), sectionHeaders.end(),
+                                        [relocSectionName, this](Elf64_Shdr &s) {
+                                            return getSectionName(s) == relocSectionName;
+                                        });
+        return *relocSecHdr;
+    }
+
+    std::vector<Elf64_Rela> getRelocs(Elf64_Shdr &section) {
+        std::vector<Elf64_Rela> relocs;
+        auto relocSecHdr = getRelocSecHdr(section);
+
+        auto base = relocSecHdr.sh_offset;
+        auto offset = 0;
+
+        while (offset < relocSecHdr.sh_size) {
+            Elf64_Rela reloc;
+            std::copy_n(file.begin() + base + offset, sizeof(Elf64_Rela), (uint8_t *) &reloc);
+            relocs.push_back(reloc);
+            offset += sizeof(Elf64_Rela);
+        }
+
+        return relocs;
+    }
+
     std::string getSectionName(Elf64_Shdr &section) {
         auto shstrtabPos = sectionHeaders[elfHeader.e_shstrndx].sh_offset;
         auto nameOffset = section.sh_name;
@@ -409,6 +403,8 @@ private:
     static bool isUselessSectionName(const std::string &name) {
         return name == ".note.gnu.property" || name.ends_with(".eh_frame");
     };
+
+    // utils
 
     Assembly disassemble(csh &handle, size_t offset, size_t size) {
         if (size == 0) {
@@ -432,6 +428,18 @@ private:
 
         return {insn, count};
     }
+
+    static size_t alignOffset(size_t offset, unsigned long alignment) {
+        if (alignment) {
+            auto rem = offset % alignment;
+
+            if (rem != 0) {
+                return offset + alignment - rem;
+            }
+        }
+
+        return offset;
+    }
 };
 
 std::ifstream readFile(const char *path) {
@@ -444,18 +452,23 @@ std::ifstream readFile(const char *path) {
     return handle;
 }
 
-int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        throw std::runtime_error("Invalid argument count");
-    }
-
-    std::basic_ifstream<char> fileHandle = readFile(argv[1]);
+void convert(const char *src, const char *dest) {
+    std::basic_ifstream<char> fileHandle = readFile(src);
     auto file = std::vector<uint8_t>(std::istreambuf_iterator<char>(fileHandle),
                                      std::istreambuf_iterator<char>());
     fileHandle.close();
 
     ElfConverter converter(file);
-    converter.convert(argv[2]);
+    converter.convert(dest);
+
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        throw std::runtime_error("Invalid argument count");
+    }
+
+    convert(argv[1], argv[2]);
 
     return 0;
 }
