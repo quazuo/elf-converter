@@ -24,11 +24,11 @@ enum InstrType {
 
 InstrType getInstrType(cs_insn instr);
 
-std::vector<std::string> convertOp(cs_insn instr, int instrIndex, int currOffset, std::map<int, int> &jumps);
+std::vector<std::string> convertOp(cs_insn instr, int instrIndex, std::map<int, int> &jumps);
 
-CodeWithReloc convertOpWithReloc(cs_insn instr, int currOffset);
+CodeWithReloc convertOpWithReloc(cs_insn instr);
 
-std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndexes, KeystoneWrapper &keystone);
+std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndexes);
 
 std::set<int> getCallIndexes(Assembly &code);
 

@@ -99,7 +99,7 @@ InstrType getInstrType(cs_insn instr) {
         return MOV;
     if (op == "jmp")
         return JMP;
-    if (op.length() <= 3 && op[0] == 'j') // todo - perhaps more elegant
+    if (op.length() <= 3 && op[0] == 'j')
         return JMPCOND;
 
     throw std::runtime_error("instruction " + op + " not supported");
@@ -168,7 +168,7 @@ static CodeWithReloc convertCmpOp(cs_insn instr) {
     };
 }
 
-static CodeWithReloc convertCallOp(cs_insn instr) {
+static CodeWithReloc convertCallOp() {
     return {
         {"bl #0", "mov x9, x0"},
         R_AARCH64_CALL26
@@ -200,7 +200,6 @@ static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc) {
                         "adr " + tmp1_64 + ", 0",
                         "mov " + tmp2_64 + ", " + (sign == '-' ? "-" : "") + offset,
                         "str " + tmp1_64 + ", [" + convertReg(base) + ", " + tmp2_64 + "]"
-                        // todo - tmp1_64 w trzeciej linijce powinno byc pewnie jakims tam tmp1 (?)
                     },
                     R_AARCH64_ADR_PREL_LO21
                 };
@@ -241,7 +240,7 @@ static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc) {
     };
 }
 
-static std::vector<std::string> convertJmpOp(cs_insn instr, int offset) {
+static std::vector<std::string> convertJmpOp(int offset) {
     return {"b " + std::to_string(offset)};
 }
 
@@ -258,7 +257,7 @@ static std::vector<std::string> convertCondJmpOp(cs_insn instr, int offset) {
     return {"b." + cond + " " + std::to_string(offset)};
 }
 
-std::vector<std::string> convertOp(cs_insn instr, int instrIndex, int currOffset, std::map<int, int> &jumps) {
+std::vector<std::string> convertOp(cs_insn instr, int instrIndex, std::map<int, int> &jumps) {
     InstrType type = getInstrType(instr);
     std::vector<std::string> code;
     CodeWithReloc codeWithReloc;
@@ -279,7 +278,7 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, int currOffset
             code = codeWithReloc.first;
             break;
         case CALL:
-            codeWithReloc = convertCallOp(instr);
+            codeWithReloc = convertCallOp();
             code = codeWithReloc.first;
             break;
         case MOV:
@@ -287,7 +286,7 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, int currOffset
             code = codeWithReloc.first;
             break;
         case JMP:
-            code = convertJmpOp(instr, jumps[instrIndex]);
+            code = convertJmpOp(jumps[instrIndex]);
             break;
         case JMPCOND:
             code = convertCondJmpOp(instr, jumps[instrIndex]);
@@ -297,7 +296,7 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, int currOffset
     return code;
 }
 
-CodeWithReloc convertOpWithReloc(cs_insn instr, int currOffset) {
+CodeWithReloc convertOpWithReloc(cs_insn instr) {
     InstrType type = getInstrType(instr);
     CodeWithReloc codeWithReloc;
 
@@ -306,7 +305,7 @@ CodeWithReloc convertOpWithReloc(cs_insn instr, int currOffset) {
             codeWithReloc = convertCmpOp(instr);
             break;
         case CALL:
-            codeWithReloc = convertCallOp(instr);
+            codeWithReloc = convertCallOp();
             break;
         case MOV:
             codeWithReloc = convertMovOp(instr, true);
@@ -318,7 +317,7 @@ CodeWithReloc convertOpWithReloc(cs_insn instr, int currOffset) {
     return codeWithReloc;
 }
 
-std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndexes, KeystoneWrapper &keystone) {
+std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndexes) {
     std::map<int, int> res{};
 
     std::map<int, int> dummyJumps; // for convertOp
@@ -334,10 +333,10 @@ std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndex
         std::vector<std::string> currCode;
 
         if (relocIndexes.contains(i)) {
-            auto codeWithReloc = convertOpWithReloc(currInstr, 0);
+            auto codeWithReloc = convertOpWithReloc(currInstr);
             currCode = codeWithReloc.first;
         } else {
-            currCode = convertOp(currInstr, i, 0, dummyJumps);
+            currCode = convertOp(currInstr, i, dummyJumps);
         }
 
         if (type == PROLOGUE) {
@@ -366,10 +365,6 @@ std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndex
 
         while (code.insn[j].address != dest) {
             j++;
-        }
-
-        if (j == code.count) {
-            throw std::runtime_error("you dun fucked up !!! in: " + std::string(__FUNCTION__));
         }
 
         res.emplace(i, 4 * (instrIndexMapping.at(j) - instrIndexMapping.at(i)));

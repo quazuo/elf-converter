@@ -60,7 +60,7 @@ public:
                 newFile.resize(newFile.size() + currSize);
 
             } else if (sec.sh_flags & SHF_EXECINSTR) {
-                Assembly x86Code = disassemble(capstone.handle, sec.sh_offset, sec.sh_size);
+                Assembly x86Code = disassemble(capstone, sec.sh_offset, sec.sh_size);
 
                 // get relocations data
                 Elf64_Shdr relocsHeader = getRelocSecHdr(sec);
@@ -68,7 +68,7 @@ public:
                 std::map<int, size_t> relocIndexes = getRelocIndexes(x86Code, relocs); // indexOfInstr -> indexOfReloc
 
                 // helper data
-                std::map<int, int> jumps = getArmJumps(x86Code, relocIndexes, keystone);
+                std::map<int, int> jumps = getArmJumps(x86Code, relocIndexes);
                 std::set<int> calls = getCallIndexes(x86Code);
 
                 size_t currInstrOffset = 0;
@@ -93,7 +93,7 @@ public:
                     std::vector<std::string> currCode;
 
                     if (relocIndexes.contains(i)) {
-                        auto codeWithReloc = convertOpWithReloc(currInstr, currInstrOffset);
+                        auto codeWithReloc = convertOpWithReloc(currInstr);
                         currCode = codeWithReloc.first;
                         auto currRelocType = codeWithReloc.second;
                         Elf64_Rela *currReloc = &relocs[relocIndexes.at(i)];
@@ -112,7 +112,7 @@ public:
                         }
 
                     } else {
-                        currCode = convertOp(currInstr, i, currInstrOffset, jumps);
+                        currCode = convertOp(currInstr, i, jumps);
                     }
 
                     armCode.push_back(currCode);
@@ -319,14 +319,14 @@ private:
     std::vector<uint8_t> fixSectionNameTable() {
         std::vector<uint8_t> res = {'\0'};
 
-        auto shstrtab = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this](Elf64_Shdr &sec) {
+        auto shstrtabHeader = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this](Elf64_Shdr &sec) {
             return getSectionName(sec) == ".shstrtab";
         });
 
-        auto offset = shstrtab->sh_offset;
-        auto gluedNames = std::string(file.begin() + offset, file.begin() + offset + shstrtab->sh_size);
+        auto gluedNames = std::string(file.begin() + shstrtabHeader->sh_offset,
+                                      file.begin() + shstrtabHeader->sh_offset + shstrtabHeader->sh_size);
 
-        for (size_t i = 1; i < shstrtab->sh_size;) {
+        for (size_t i = 1; i < shstrtabHeader->sh_size;) {
             auto currName = std::string(gluedNames.c_str() + i); // trick to split on null characters
 
             if (!isUselessSectionName(currName)) {
@@ -343,8 +343,8 @@ private:
             }
 
             auto name = getSectionName(sec);
-            auto it = std::search(res.begin(), res.end(), name.begin(), name.end());
-            sec.sh_name = std::distance(res.begin(), it);
+            auto iter = std::search(res.begin(), res.end(), name.begin(), name.end());
+            sec.sh_name = std::distance(res.begin(), iter);
         }
 
         return res;
@@ -354,11 +354,11 @@ private:
         elfHeader.e_machine = EM_AARCH64;
         elfHeader.e_shoff = elfHeader.e_ehsize;
 
-        auto shstrtabIter = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this](Elf64_Shdr &sec) {
+        auto shstrtabHeader = std::find_if(sectionHeaders.begin(), sectionHeaders.end(), [this](Elf64_Shdr &sec) {
             return getSectionName(sec) == ".shstrtab";
         });
 
-        elfHeader.e_shstrndx = std::distance(sectionHeaders.begin(), shstrtabIter);
+        elfHeader.e_shstrndx = std::distance(sectionHeaders.begin(), shstrtabHeader);
     }
 
     // section utils
@@ -415,7 +415,7 @@ private:
         std::string res;
 
         for (size_t i = shstrtabPos + nameOffset; file[i] != '\0'; i++)
-            res.push_back(file[i]);
+            res.push_back((char)file[i]);
 
         return res;
     }
@@ -424,18 +424,17 @@ private:
         return name == ".note.gnu.property" || name.ends_with(".eh_frame");
     };
 
-    // utils
+    // general utils
 
-    Assembly disassemble(csh &handle, size_t offset, size_t size) {
+    Assembly disassemble(CapstoneWrapper &capstone, size_t offset, size_t size) {
         if (size == 0) {
             return {nullptr, 0};
         }
 
         cs_insn *insn;
-        size_t count = cs_disasm(handle, &file[offset], size, 0, 0, &insn);
+        size_t count = cs_disasm(capstone.handle, &file[offset], size, 0, 0, &insn);
 
         if (count <= 0) {
-            cs_close(&handle);
             throw std::runtime_error("decompilation failed");
         }
 
