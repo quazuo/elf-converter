@@ -117,17 +117,12 @@ static std::vector<std::string> convertArithmeticOp(cs_insn instr) {
     return {std::string(instr.mnemonic) + " " + newArg1 + ", " + newArg1 + ", " + newArg2};
 }
 
-static CodeWithReloc generateMemAccess(std::string &src, const std::string &dest, int currOffset) {
+static CodeWithReloc generateMemAccess(std::string &src, const std::string &dest) {
     auto [base, sign, offset] = splitMemAccess(src);
-
-    std::string off;
-    std::stringstream ss;
-    ss << currOffset;
-    ss >> std::hex >> off;
 
     if (base == "rip") {
         return {
-            {"ldr " + convertReg(dest) + ", " + off}, // `off` instead of 0 bcs who the f knows
+            {"ldr " + convertReg(dest) + ", 0"},
             R_AARCH64_LD_PREL_LO19
         };
     }
@@ -142,12 +137,12 @@ static CodeWithReloc generateMemAccess(std::string &src, const std::string &dest
     };
 }
 
-static CodeWithReloc convertCmpOp(cs_insn instr, int currOffset) {
+static CodeWithReloc convertCmpOp(cs_insn instr) {
     auto [arg1, arg2] = splitArgs(instr);
 
     if (arg1.find('[') != std::string::npos) { // cmp mem, reg/imm
         std::string temp1 = getAppropriateTemp1Reg(arg2);
-        auto [code, reloc] = generateMemAccess(arg1, temp1, currOffset);
+        auto [code, reloc] = generateMemAccess(arg1, temp1);
         std::string newArg2 = isReg(arg2) ? convertReg(arg2) : arg2;
 
         code.emplace_back("cmp " + temp1 + ", " + newArg2);
@@ -155,7 +150,7 @@ static CodeWithReloc convertCmpOp(cs_insn instr, int currOffset) {
     }
 
     if (arg2.find('[') != std::string::npos) { // cmp reg, mem
-        auto [code, reloc] = generateMemAccess(arg2, tmp1_64, currOffset);
+        auto [code, reloc] = generateMemAccess(arg2, tmp1_64);
 
         std::string newArg1 = convertReg(arg1);
         std::string newArg2 = getAppropriateTemp1Reg(arg1);
@@ -180,7 +175,7 @@ static CodeWithReloc convertCallOp(cs_insn instr) {
     };
 }
 
-static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc, int currOffset) {
+static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc) {
     auto [arg1, arg2] = splitArgs(instr);
 
     if (arg1.find('[') != std::string::npos) { // mov mem, reg/imm
@@ -226,7 +221,7 @@ static CodeWithReloc convertMovOp(cs_insn instr, bool withReloc, int currOffset)
     }
 
     if (arg2.find('[') != std::string::npos) { // mov reg, mem
-        return generateMemAccess(arg2, arg1, currOffset);
+        return generateMemAccess(arg2, arg1);
     }
 
     // mov reg, reg/imm
@@ -280,7 +275,7 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, int currOffset
             code = convertArithmeticOp(instr);
             break;
         case CMP:
-            codeWithReloc = convertCmpOp(instr, currOffset);
+            codeWithReloc = convertCmpOp(instr);
             code = codeWithReloc.first;
             break;
         case CALL:
@@ -288,7 +283,7 @@ std::vector<std::string> convertOp(cs_insn instr, int instrIndex, int currOffset
             code = codeWithReloc.first;
             break;
         case MOV:
-            codeWithReloc = convertMovOp(instr, false, currOffset);
+            codeWithReloc = convertMovOp(instr, false);
             code = codeWithReloc.first;
             break;
         case JMP:
@@ -308,13 +303,13 @@ CodeWithReloc convertOpWithReloc(cs_insn instr, int currOffset) {
 
     switch (type) {
         case CMP:
-            codeWithReloc = convertCmpOp(instr, currOffset);
+            codeWithReloc = convertCmpOp(instr);
             break;
         case CALL:
             codeWithReloc = convertCallOp(instr);
             break;
         case MOV:
-            codeWithReloc = convertMovOp(instr, true, currOffset);
+            codeWithReloc = convertMovOp(instr, true);
             break;
         default:
             throw std::runtime_error("unexpected operation in " + std::string(__FUNCTION__));
@@ -377,7 +372,7 @@ std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndex
             throw std::runtime_error("you dun fucked up !!! in: " + std::string(__FUNCTION__));
         }
 
-        res.emplace(i, 4 * (instrIndexMapping.at(j)));
+        res.emplace(i, 4 * (instrIndexMapping.at(j) - instrIndexMapping.at(i)));
     }
 
     return res;
