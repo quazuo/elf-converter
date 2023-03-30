@@ -60,6 +60,8 @@ static std::pair<std::string, std::string> splitArgs(cs_insn instr) {
 }
 
 static std::tuple<std::string, char, std::string> splitMemAccess(std::string &mem) {
+    // split strings referring to memory access, like "[rax - 24]", into smaller tokens
+
     if (mem.find('+') == std::string::npos && mem.find('-') == std::string::npos) {
         std::string base = mem.substr(mem.find('[') + 1);
         base.erase(base.find(']'));
@@ -68,12 +70,13 @@ static std::tuple<std::string, char, std::string> splitMemAccess(std::string &me
     }
 
     std::string delim = mem.find('+') == std::string::npos ? " - " : " + ";
+    char sign = delim[1];
 
     auto base = mem.substr(mem.find('[') + 1, mem.find(delim) - mem.find('[') - 1);
     auto offset = mem.substr(mem.find(delim) + delim.length());
     offset.pop_back();
 
-    return {base, delim[1], offset};
+    return {base, sign, offset};
 }
 
 enum InstrType {
@@ -99,7 +102,7 @@ InstrType getInstrType(cs_insn instr) {
         return MOV;
     if (op == "jmp")
         return JMP;
-    if (op.length() <= 3 && op[0] == 'j')
+    if (op.length() <= 3 && op[0] == 'j') // could do it more elegantly but idk
         return JMPCOND;
 
     throw std::runtime_error("instruction " + op + " not supported");
@@ -318,7 +321,7 @@ CodeWithReloc convertOpWithReloc(cs_insn instr) {
 }
 
 std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndexes) {
-    std::map<int, int> res{};
+    std::map<int, int> result{};
 
     std::map<int, int> dummyJumps; // for convertOp
     std::map<int, int> instrIndexMapping; // (index of x86 instruction) -> (index of arm instruction)
@@ -340,13 +343,13 @@ std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndex
         }
 
         if (type == PROLOGUE) {
-            i += x86Prologue.size() - 1;
+            i += (int)x86Prologue.size() - 1;
 
         } else if (type == EPILOGUE) {
-            i += x86Epilogue.size() - 1;
+            i += (int)x86Epilogue.size() - 1;
         }
 
-        currSize += currCode.size();
+        currSize += (int)currCode.size();
     }
 
     for (int i = 0; i < code.count; i++) {
@@ -367,10 +370,10 @@ std::map<int, int> getArmJumps(Assembly &code, std::map<int, size_t> &relocIndex
             j++;
         }
 
-        res.emplace(i, 4 * (instrIndexMapping.at(j) - instrIndexMapping.at(i)));
+        result.emplace(i, 4 * (instrIndexMapping.at(j) - instrIndexMapping.at(i)));
     }
 
-    return res;
+    return result;
 }
 
 std::set<int> getCallIndexes(Assembly &code) {
@@ -388,7 +391,7 @@ std::set<int> getCallIndexes(Assembly &code) {
 }
 
 std::map<int, size_t> getRelocIndexes(Assembly &code, std::vector<Elf64_Rela> &relocs) {
-    std::map<int, size_t> res;
+    std::map<int, size_t> result;
 
     for (int i = 0; i < code.count; i++) {
         cs_insn currInstr = code.insn[i];
@@ -401,7 +404,7 @@ std::map<int, size_t> getRelocIndexes(Assembly &code, std::vector<Elf64_Rela> &r
             });
 
             if (reloc != relocs.end()) {
-                res[i] = std::distance(relocs.begin(), reloc);
+                result[i] = std::distance(relocs.begin(), reloc);
             }
 
         } else {
@@ -410,10 +413,10 @@ std::map<int, size_t> getRelocIndexes(Assembly &code, std::vector<Elf64_Rela> &r
             });
 
             if (reloc != relocs.end()) {
-                res[i] = std::distance(relocs.begin(), reloc);
+                result[i] = std::distance(relocs.begin(), reloc);
             }
         }
     }
 
-    return res;
+    return result;
 }
