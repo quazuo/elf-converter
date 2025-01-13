@@ -2,6 +2,7 @@
 #include <elf.h>
 #include <fstream>
 #include <array>
+#include <algorithm>
 #include <vector>
 #include <cstring>
 #include <iomanip>
