@@ -1,3 +1,3 @@
 # elf-converter
 
-Simple C++ program that aims to convert relocatable ELF (.o) files compiled for the x86-64 architecture to files adapted for the AArch64 architecture. Since this is not really finished yet, only a subset of assembly instructions and ELF features are handled. As such, only files that contain exclusively supported instructions are supported by this program.
+Simple C++ program that aims to convert relocatable ELF (.o) files compiled for the x86-64 architecture to files adapted for the AArch64 architecture. This was just a simple uni assignment project, so only a subset of assembly instructions and ELF features are handled. As such, only files that contain exclusively supported instructions are supported by this program.
